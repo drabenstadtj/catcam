@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>CatCam - Sessions</title>
+</head>
+<body>
+  <h1>Cat Sessions</h1>
+  <p><a href="/">← Live view</a></p>
+  <p>{{ clips|length }} clip(s) saved &nbsp;|&nbsp; clips are stored at <code>/data/clips/</code></p>
+
+  {% if not clips %}
+    <p>No clips yet.</p>
+  {% endif %}
+
+  {% for clip in clips %}
+  <hr>
+  <h3>{{ clip.label }} &nbsp; <small>{{ clip.size_mb }} MB</small></h3>
+  <video width="640" controls preload="metadata">
+    <source src="/clips/{{ clip.name }}" type="video/mp4">
+  </video>
+  <br>
+  <a href="/clips/{{ clip.name }}" download="{{ clip.name }}">Download</a>
+  {% endfor %}
+</body>
+</html>

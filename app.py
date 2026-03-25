@@ -8,7 +8,7 @@ from collections import deque
 
 import cv2
 import numpy as np
-from flask import Flask, Response, render_template, jsonify
+from flask import Flask, Response, render_template, jsonify, send_from_directory
 from flask_socketio import SocketIO
 from ultralytics import YOLO
 
@@ -152,48 +152,47 @@ def _stream_worker() -> None:
                         cv2.putText(frame, f"cat  {conf:.0%}", (x1, max(y1 - 8, 18)),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 230, 60), 2, cv2.LINE_AA)
 
-                # ---- state transitions ----
+                # ---- state: cat visible on screen ----
                 if detected and not prev_detected:
-                    with _state_lock:
-                        _state["count"] += 1
-                        _state["cat_detected"] = True
-                        count_snap = _state["count"]
-                    _log_event(f"Cat detected (session total: {count_snap})")
-                    socketio.emit("status", _get_state())
+                    _update_state(cat_detected=True)
                 elif not detected and prev_detected:
                     _update_state(cat_detected=False)
-                    socketio.emit("status", _get_state())
 
                 prev_detected = detected
 
-                # ---- clip recording ----
-                # Always keep a compressed pre-roll buffer
+                # ---- clip recording / session logic ----
+                # Always push to the compressed pre-roll buffer (unannotated
+                # frames for cleaner pre-roll would require a second copy; the
+                # annotated frame is fine since detection boxes show context).
                 _, jpeg_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
                 pre_buffer.append(jpeg_buf.tobytes())
 
                 if detected:
-                    # Extend (or start) the recording window
+                    # Extend (or start) the recording window each time the cat
+                    # is visible — brief disappearances don't end the session.
                     record_until = time.time() + POST_ROLL
                     if clip_writer is None:
                         ts_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                         clip_path = os.path.join(CLIPS_DIR, f"cat_{ts_str}.mp4")
                         clip_writer = _new_clip_writer(clip_path)
-                        # Flush the pre-roll buffer first
+                        # Flush pre-roll buffer so clip starts before detection
                         for jpeg_bytes in pre_buffer:
                             decoded = cv2.imdecode(
                                 np.frombuffer(jpeg_bytes, dtype=np.uint8), cv2.IMREAD_COLOR
                             )
                             if decoded is not None:
                                 clip_writer.write(decoded)
-                        log.info("Clip started: %s", clip_path)
+                        with _state_lock:
+                            _state["count"] += 1
+                            count_snap = _state["count"]
+                        _log_event(f"Session {count_snap} started — clip: {os.path.basename(clip_path)}")
 
                 if clip_writer is not None:
                     clip_writer.write(frame)
                     if time.time() > record_until:
                         clip_writer.release()
                         clip_writer = None
-                        _log_event(f"Clip saved: {clip_path}")
-                        log.info("Clip saved: %s", clip_path)
+                        _log_event(f"Session {count_snap} ended — saved: {os.path.basename(clip_path)}")
 
                 with _frame_lock:
                     _latest_frame = frame
@@ -241,6 +240,30 @@ def video_feed():
 @app.route("/api/status")
 def api_status():
     return jsonify(_get_state())
+
+
+@app.route("/clips")
+def clips_page():
+    clips = []
+    if os.path.exists(CLIPS_DIR):
+        for fname in sorted(os.listdir(CLIPS_DIR), reverse=True):
+            if fname.endswith(".mp4"):
+                path = os.path.join(CLIPS_DIR, fname)
+                size_mb = os.path.getsize(path) / (1024 * 1024)
+                # Parse timestamp from filename: cat_YYYYMMDD_HHMMSS.mp4
+                try:
+                    ts = datetime.datetime.strptime(fname, "cat_%Y%m%d_%H%M%S.mp4")
+                    label = ts.strftime("%d %b %Y  %H:%M:%S")
+                except ValueError:
+                    label = fname
+                clips.append({"name": fname, "label": label, "size_mb": f"{size_mb:.1f}"})
+    return render_template("clips.html", clips=clips)
+
+
+@app.route("/clips/<path:filename>")
+def serve_clip(filename):
+    filename = os.path.basename(filename)   # prevent path traversal
+    return send_from_directory(CLIPS_DIR, filename, mimetype="video/mp4")
 
 
 # ---------------------------------------------------------------------------
