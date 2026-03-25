@@ -2,6 +2,7 @@ import os
 import time
 import datetime
 import logging
+import subprocess
 import threading
 
 import cv2
@@ -85,7 +86,21 @@ def _encode_jpeg(frame: np.ndarray) -> bytes:
 # ---------------------------------------------------------------------------
 # Background stream + inference thread
 # ---------------------------------------------------------------------------
-_STREAM_URL = "udp://0.0.0.0:5000"
+
+# FFmpeg command that decodes the incoming MPEG-TS stream to raw BGR frames.
+# Requires the Pi to send with -c:v mpeg1video (or libx264/mpeg2video) —
+# NOT -vcodec copy, which embeds MJPEG as a private data stream that most
+# demuxers cannot decode.
+def _ffmpeg_cmd() -> list[str]:
+    return [
+        "ffmpeg",
+        "-loglevel", "error",
+        "-i", "udp://0.0.0.0:5000",
+        "-vf", f"scale={FRAME_WIDTH}:{FRAME_HEIGHT}",
+        "-f", "rawvideo",
+        "-pix_fmt", "bgr24",
+        "pipe:1",
+    ]
 
 
 def _stream_worker() -> None:
@@ -95,32 +110,30 @@ def _stream_worker() -> None:
     model = YOLO(MODEL_PATH)
     log.info("Model ready.")
 
+    frame_bytes = FRAME_WIDTH * FRAME_HEIGHT * 3
+
     while True:
-        log.info("Opening stream %s ...", _STREAM_URL)
-        cap = cv2.VideoCapture(_STREAM_URL, cv2.CAP_FFMPEG)
-        # Keep the internal buffer tiny so we always get the latest frame.
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
-        if not cap.isOpened():
-            log.warning("Could not open stream. Retrying in 3 s...")
-            time.sleep(3)
-            continue
-
-        new_state = _update_state(stream_connected=True)
-        socketio.emit("status", new_state)
-        prev_detected = False
-
+        log.info("Starting FFmpeg — listening on udp://0.0.0.0:5000 ...")
         try:
+            proc = subprocess.Popen(
+                _ffmpeg_cmd(), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+            )
+            new_state = _update_state(stream_connected=True)
+            socketio.emit("status", new_state)
+
+            prev_detected = False
+
             while True:
-                ret, frame = cap.read()
-                if not ret or frame is None:
-                    log.warning("cap.read() failed — stream ended.")
+                raw = proc.stdout.read(frame_bytes)
+                if len(raw) != frame_bytes:
+                    log.warning("Short read (%d bytes) — stream ended.", len(raw))
                     break
 
-                # Normalise to the display size if the source differs.
-                h, w = frame.shape[:2]
-                if w != FRAME_WIDTH or h != FRAME_HEIGHT:
-                    frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT))
+                frame = (
+                    np.frombuffer(raw, dtype=np.uint8)
+                    .reshape((FRAME_HEIGHT, FRAME_WIDTH, 3))
+                    .copy()
+                )
 
                 results = model(frame, classes=[CAT_CLASS_ID], verbose=False)
 
@@ -160,10 +173,11 @@ def _stream_worker() -> None:
                 with _frame_lock:
                     _latest_frame = frame
 
+            proc.wait()
+
         except Exception as exc:
             log.error("Stream error: %s", exc)
         finally:
-            cap.release()
             new_state = _update_state(stream_connected=False, cat_detected=False)
             socketio.emit("status", new_state)
 
