@@ -146,8 +146,11 @@ class ClipWriter:
         except (BrokenPipeError, ValueError):
             pass
 
-    def release(self) -> None:
-        """Finalise the clip: flush FFmpeg, then apply faststart via stream copy."""
+    def release(self) -> bool:
+        """Finalise the clip: flush FFmpeg, then apply faststart via stream copy.
+
+        Returns True if the clip was successfully saved, False otherwise.
+        """
         try:
             self._proc.stdin.close()
         except Exception:
@@ -169,7 +172,7 @@ class ClipWriter:
             log.warning("Clip encoder produced no output — skipping %s", self.path)
             if os.path.exists(self._tmp):
                 os.remove(self._tmp)
-            return
+            return False
 
         r = subprocess.run(
             ["ffmpeg", "-y", "-loglevel", "error",
@@ -184,6 +187,7 @@ class ClipWriter:
             log.warning("Faststart pass failed — falling back to non-faststart clip")
             if os.path.exists(self._tmp):
                 os.rename(self._tmp, self.path)
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -292,14 +296,17 @@ def _stream_worker() -> None:
                 if clip_writer is not None:
                     clip_writer.write(frame)
                     if time.time() > record_until:
-                        clip_writer.release()
+                        saved = clip_writer.release()
                         clip_writer = None
-                        _log_event(f"Session {count_snap} ended — saved: {os.path.basename(clip_path)}")
-                        threading.Thread(
-                            target=_discord_notify,
-                            args=(f"Session #{count_snap} ended — clip attached", clip_path),
-                            daemon=True,
-                        ).start()
+                        if saved:
+                            _log_event(f"Session {count_snap} ended — saved: {os.path.basename(clip_path)}")
+                            threading.Thread(
+                                target=_discord_notify,
+                                args=(f"Session #{count_snap} ended — clip attached", clip_path),
+                                daemon=True,
+                            ).start()
+                        else:
+                            _log_event(f"Session {count_snap} ended — clip not saved (encoder error)")
 
                 with _frame_lock:
                     _latest_frame = frame
