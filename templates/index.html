@@ -18,24 +18,30 @@
   <h3>Detection log</h3>
   <div id="log">No detections yet.</div>
 
-  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js" integrity="sha384-mZLF4UVrpi/QTWPA7BjNPEnkIfRFn4ZEO3Qt/HFklTJBj/gBOV8G3HcKn4NfQbl" crossorigin="anonymous"></script>
   <script>
-    const socket = io({ transports: ["websocket", "polling"] });
     let lastCount = 0;
 
-    socket.on("status", (data) => {
-      document.getElementById("label-stream").textContent = data.stream_connected ? "connected" : "waiting";
-      document.getElementById("label-cat").textContent = data.cat_detected ? "YES" : "no";
-      document.getElementById("count").textContent = data.count;
+    function poll() {
+      fetch("/api/status")
+        .then(r => r.json())
+        .then(data => {
+          document.getElementById("label-stream").textContent = data.stream_connected ? "connected" : "waiting";
+          document.getElementById("label-cat").textContent = data.cat_detected ? "YES" : "no";
+          document.getElementById("count").textContent = data.count;
 
-      if (data.count > lastCount) {
-        const ts = new Date().toLocaleTimeString();
-        const log = document.getElementById("log");
-        if (log.textContent === "No detections yet.") log.textContent = "";
-        log.innerHTML = `[${ts}] Cat detected (total: ${data.count})<br>` + log.innerHTML;
-        lastCount = data.count;
-      }
-    });
+          if (data.count > lastCount) {
+            const ts = new Date().toLocaleTimeString();
+            const log = document.getElementById("log");
+            if (log.textContent === "No detections yet.") log.textContent = "";
+            log.innerHTML = `[${ts}] Cat detected (total: ${data.count})<br>` + log.innerHTML;
+            lastCount = data.count;
+          }
+        })
+        .catch(() => {});
+    }
+
+    poll();
+    setInterval(poll, 1000);
   </script>
 </body>
 </html>
