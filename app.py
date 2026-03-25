@@ -130,6 +130,22 @@ class ClipWriter:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self.path = path                # final .mp4 (written by release())
         self._tmp  = path + ".tmp"      # intermediate H.264 file
+        self._proc = self._start_ffmpeg()
+
+    def _cpu_cmd(self) -> list:
+        return [
+            "ffmpeg", "-y", "-loglevel", "warning",
+            "-f", "rawvideo", "-pix_fmt", "bgr24",
+            "-s", f"{FRAME_WIDTH}x{FRAME_HEIGHT}",
+            "-r", str(STREAM_FPS),
+            "-i", "pipe:0",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-profile:v", "baseline", "-level", "3.0",
+            "-f", "mp4", self._tmp,
+        ]
+
+    def _start_ffmpeg(self) -> subprocess.Popen:
         if HWACCEL == "qsv":
             cmd = [
                 "ffmpeg", "-y", "-loglevel", "warning",
@@ -142,19 +158,14 @@ class ClipWriter:
                 "-c:v", "h264_qsv", "-global_quality", "23",
                 "-f", "mp4", self._tmp,
             ]
-        else:
-            cmd = [
-                "ffmpeg", "-y", "-loglevel", "warning",
-                "-f", "rawvideo", "-pix_fmt", "bgr24",
-                "-s", f"{FRAME_WIDTH}x{FRAME_HEIGHT}",
-                "-r", str(STREAM_FPS),
-                "-i", "pipe:0",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-                "-pix_fmt", "yuv420p",
-                "-profile:v", "baseline", "-level", "3.0",
-                "-f", "mp4", self._tmp,
-            ]
-        self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+            import time as _time; _time.sleep(0.2)
+            if proc.poll() is not None:
+                stderr = proc.stderr.read().decode(errors="replace").strip()
+                log.warning("QSV init failed, falling back to CPU encoding: %s", stderr)
+                proc = subprocess.Popen(self._cpu_cmd(), stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+            return proc
+        return subprocess.Popen(self._cpu_cmd(), stdin=subprocess.PIPE, stderr=subprocess.PIPE)
 
     def write(self, frame: np.ndarray) -> None:
         if self._proc.poll() is not None:   # process already dead

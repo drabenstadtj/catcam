@@ -13,7 +13,7 @@ services:
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
       - PRE_ROLL=5
       - POST_ROLL=5
-      - HWACCEL=qsv
+      - HWACCEL=cpu
       - INFER_EVERY=3
       - OMP_NUM_THREADS=2
       - MKL_NUM_THREADS=2
