@@ -82,10 +82,18 @@ def _log_event(msg: str) -> None:
     log.info(entry.strip())
 
 
-def _discord_notify(message: str, file_path: str | None = None) -> None:
+def _discord_notify(message: str, file_path: str | None = None, jpeg_bytes: bytes | None = None) -> None:
     if not DISCORD_WEBHOOK:
         return
     try:
+        if jpeg_bytes:
+            requests.post(
+                DISCORD_WEBHOOK,
+                data={"content": message},
+                files={"file": ("snapshot.jpg", jpeg_bytes, "image/jpeg")},
+                timeout=10,
+            )
+            return
         if file_path and os.path.exists(file_path):
             size_mb = os.path.getsize(file_path) / (1024 * 1024)
             if size_mb <= DISCORD_MAX_MB:
@@ -332,6 +340,13 @@ def _stream_worker() -> None:
                             _state["count"] += 1
                             count_snap = _state["count"]
                         _log_event(f"Session {count_snap} started — clip: {os.path.basename(clip_path)}")
+                        _, snap_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                        threading.Thread(
+                            target=_discord_notify,
+                            args=(f"#{count_snap} at {datetime.datetime.now().strftime('%H:%M:%S')}",),
+                            kwargs={"jpeg_bytes": snap_buf.tobytes()},
+                            daemon=True,
+                        ).start()
 
                 if clip_writer is not None:
                     clip_writer.write(frame)
@@ -342,7 +357,7 @@ def _stream_worker() -> None:
                             _log_event(f"Session {count_snap} ended — saved: {os.path.basename(clip_path)}")
                             threading.Thread(
                                 target=_discord_notify,
-                                args=(f"Session #{count_snap} ended — clip attached", clip_path),
+                                args=(f"#{count_snap} at {datetime.datetime.now().strftime('%H:%M:%S')}, {round(time.time() - (record_until - POST_ROLL))}s", clip_path),
                                 daemon=True,
                             ).start()
                         else:
