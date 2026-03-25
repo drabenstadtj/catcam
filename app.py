@@ -143,7 +143,7 @@ class ClipWriter:
             return
         try:
             self._proc.stdin.write(frame.tobytes())
-        except BrokenPipeError:
+        except (BrokenPipeError, ValueError):
             pass
 
     def release(self) -> None:
@@ -152,9 +152,16 @@ class ClipWriter:
             self._proc.stdin.close()
         except Exception:
             pass
-        _, stderr_data = self._proc.communicate()
-        if stderr_data:
-            log.warning("ClipWriter FFmpeg: %s", stderr_data.decode(errors="replace").strip())
+        try:
+            _, stderr_data = self._proc.communicate(timeout=30)
+            if stderr_data:
+                log.warning("ClipWriter FFmpeg: %s", stderr_data.decode(errors="replace").strip())
+        except Exception:
+            self._proc.kill()
+            try:
+                self._proc.wait(timeout=5)
+            except Exception:
+                pass
 
         # Stream-copy into final path with moov atom at the front.
         # No re-encoding — this completes in under a second for most clips.

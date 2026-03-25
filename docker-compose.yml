@@ -3,12 +3,11 @@ services:
     build: .
     ports:
       - "5000:5000/udp"   # Incoming MPEG-TS stream from Pi
-      - "8080:8080/tcp"   # Web interface
+      - "8087:8080/tcp"   # Web interface
     volumes:
-      - catcam_data:/data  # Persistent detection log
+      - ./data:/data  # Persistent detection log
     environment:
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
     restart: unless-stopped
 
-volumes:
-  catcam_data:
+
