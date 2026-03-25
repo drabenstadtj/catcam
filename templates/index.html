@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CatCam</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0f0f13;
+      color: #e2e2e8;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      padding: 24px 16px;
+      gap: 20px;
+    }
+
+    header {
+      text-align: center;
+    }
+
+    header h1 {
+      font-size: 2rem;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+    }
+
+    header h1 span.cat { color: #f9a825; }
+
+    /* ---- status bar ---- */
+    #status-bar {
+      display: flex;
+      gap: 24px;
+      align-items: center;
+      background: #1a1a24;
+      border: 1px solid #2a2a38;
+      border-radius: 12px;
+      padding: 12px 28px;
+      font-size: 0.95rem;
+    }
+
+    .pill {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      transition: background 0.3s;
+    }
+
+    #dot-cat      { background: #444; }
+    #dot-stream   { background: #444; }
+
+    body.cat-detected    #dot-cat    { background: #22c55e; box-shadow: 0 0 6px #22c55e; }
+    body.stream-ok       #dot-stream { background: #3b82f6; box-shadow: 0 0 6px #3b82f6; }
+
+    #label-cat    { color: #94a3b8; }
+    #label-stream { color: #94a3b8; }
+
+    body.cat-detected #label-cat    { color: #22c55e; font-weight: 600; }
+    body.stream-ok    #label-stream { color: #3b82f6; }
+
+    .divider { width: 1px; height: 28px; background: #2a2a38; }
+
+    #count-display {
+      font-size: 0.9rem;
+      color: #94a3b8;
+    }
+
+    #count-display strong {
+      color: #f9a825;
+      font-size: 1.1rem;
+    }
+
+    /* ---- video ---- */
+    #feed-wrapper {
+      position: relative;
+      border-radius: 12px;
+      overflow: hidden;
+      border: 2px solid #2a2a38;
+      transition: border-color 0.3s;
+      max-width: 640px;
+      width: 100%;
+    }
+
+    body.cat-detected #feed-wrapper {
+      border-color: #22c55e;
+      box-shadow: 0 0 18px rgba(34, 197, 94, 0.25);
+    }
+
+    #feed {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+
+    #overlay-badge {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      background: rgba(34, 197, 94, 0.85);
+      color: #fff;
+      font-size: 0.78rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      padding: 4px 10px;
+      border-radius: 6px;
+      display: none;
+      text-transform: uppercase;
+    }
+
+    body.cat-detected #overlay-badge { display: block; }
+
+    /* ---- log ---- */
+    #log-section {
+      width: 100%;
+      max-width: 640px;
+    }
+
+    #log-section h2 {
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: #64748b;
+      margin-bottom: 8px;
+    }
+
+    #log-list {
+      background: #1a1a24;
+      border: 1px solid #2a2a38;
+      border-radius: 8px;
+      padding: 12px 16px;
+      max-height: 180px;
+      overflow-y: auto;
+      font-family: "Cascadia Code", "Fira Code", monospace;
+      font-size: 0.82rem;
+      color: #64748b;
+      display: flex;
+      flex-direction: column-reverse;   /* newest at top */
+      gap: 2px;
+    }
+
+    #log-list .entry { color: #a0aec0; }
+    #log-list .entry .ts { color: #4a5568; margin-right: 8px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1><span class="cat">Cat</span>Cam</h1>
+  </header>
+
+  <div id="status-bar">
+    <div class="pill">
+      <div class="dot" id="dot-stream"></div>
+      <span id="label-stream">Waiting for stream</span>
+    </div>
+    <div class="divider"></div>
+    <div class="pill">
+      <div class="dot" id="dot-cat"></div>
+      <span id="label-cat">No cat</span>
+    </div>
+    <div class="divider"></div>
+    <div id="count-display">Detections: <strong id="count">0</strong></div>
+  </div>
+
+  <div id="feed-wrapper">
+    <img id="feed" src="/video_feed" alt="live feed" />
+    <div id="overlay-badge">Cat detected</div>
+  </div>
+
+  <section id="log-section">
+    <h2>Detection log</h2>
+    <div id="log-list"><span style="color:#4a5568">No detections yet this session.</span></div>
+  </section>
+
+  <!-- Socket.IO client served by Flask-SocketIO -->
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io({ transports: ["websocket", "polling"] });
+
+    const body        = document.body;
+    const labelCat    = document.getElementById("label-cat");
+    const labelStream = document.getElementById("label-stream");
+    const countEl     = document.getElementById("count");
+    const logList     = document.getElementById("log-list");
+
+    let lastCount = 0;
+
+    function ts() {
+      return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    }
+
+    function appendLog(msg) {
+      // Remove the placeholder if present
+      const placeholder = logList.querySelector("span");
+      if (placeholder) placeholder.remove();
+
+      const div = document.createElement("div");
+      div.className = "entry";
+      div.innerHTML = `<span class="ts">${ts()}</span>${msg}`;
+      logList.prepend(div);
+
+      // Keep at most 200 entries
+      while (logList.children.length > 200) logList.lastChild.remove();
+    }
+
+    socket.on("status", (data) => {
+      // Stream status
+      if (data.stream_connected) {
+        body.classList.add("stream-ok");
+        labelStream.textContent = "Stream connected";
+      } else {
+        body.classList.remove("stream-ok");
+        labelStream.textContent = "Waiting for stream";
+      }
+
+      // Cat status
+      if (data.cat_detected) {
+        body.classList.add("cat-detected");
+        labelCat.textContent = "Cat detected!";
+      } else {
+        body.classList.remove("cat-detected");
+        labelCat.textContent = "No cat";
+      }
+
+      // Counter + log entry on increment
+      if (data.count > lastCount) {
+        countEl.textContent = data.count;
+        appendLog(`Cat detected &mdash; session total: ${data.count}`);
+        lastCount = data.count;
+      } else {
+        countEl.textContent = data.count;
+      }
+    });
+
+    socket.on("connect", () => {
+      // Hydrate from REST in case we missed events
+      fetch("/api/status")
+        .then(r => r.json())
+        .then(data => socket.emit && socket._callbacks["$status"] && true)  // no-op, just sync
+        .catch(() => {});
+    });
+  </script>
+</body>
+</html>

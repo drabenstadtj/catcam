@@ -1,0 +1,12 @@
+services:
+  catcam:
+    build: .
+    ports:
+      - "5000:5000/udp"   # Incoming MPEG-TS stream from Pi
+      - "8080:8080/tcp"   # Web interface
+    volumes:
+      - catcam_data:/data  # Persistent detection log
+    restart: unless-stopped
+
+volumes:
+  catcam_data:

@@ -1,0 +1,31 @@
+FROM python:3.11-slim
+
+# System deps: FFmpeg + OpenCV native libs
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg \
+        libgl1 \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python deps first (layer cache)
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application
+COPY app.py .
+COPY templates/ templates/
+
+# Pre-download the YOLO model so first-run startup is fast.
+# Remove this RUN line if you prefer to download at runtime.
+RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
+
+RUN mkdir -p /data
+
+EXPOSE 5000/udp
+EXPOSE 8080/tcp
+
+CMD ["python", "app.py"]
