@@ -32,6 +32,7 @@ LOG_FILE     = "/data/detections.log"
 CLIPS_DIR    = "/data/clips"
 PRE_ROLL     = int(os.environ.get("PRE_ROLL",  30))  # seconds before first detection
 POST_ROLL    = int(os.environ.get("POST_ROLL", 30))  # seconds after last detection
+INFER_EVERY  = int(os.environ.get("INFER_EVERY", 3)) # run YOLO on every Nth frame
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "")
 HWACCEL         = os.environ.get("HWACCEL", "qsv")   # qsv | cpu
 DISCORD_MAX_MB  = 25        # Discord free tier file size limit
@@ -249,6 +250,8 @@ def _stream_worker() -> None:
             socketio.emit("status", _get_state())
 
             prev_detected = False
+            detected = False
+            frame_count = 0
 
             while True:
                 raw = proc.stdout.read(frame_bytes)
@@ -262,17 +265,19 @@ def _stream_worker() -> None:
                     .copy()
                 )
 
-                # ---- inference ----
-                results = model(frame, classes=[CAT_CLASS_ID], verbose=False)
-                detected = False
-                for r in results:
-                    for box in r.boxes:
-                        detected = True
-                        x1, y1, x2, y2 = map(int, box.xyxy[0])
-                        conf = float(box.conf[0])
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 230, 60), 2)
-                        cv2.putText(frame, f"cat  {conf:.0%}", (x1, max(y1 - 8, 18)),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 230, 60), 2, cv2.LINE_AA)
+                # ---- inference (throttled) ----
+                frame_count += 1
+                if frame_count % INFER_EVERY == 0:
+                    results = model(frame, classes=[CAT_CLASS_ID], verbose=False)
+                    detected = False
+                    for r in results:
+                        for box in r.boxes:
+                            detected = True
+                            x1, y1, x2, y2 = map(int, box.xyxy[0])
+                            conf = float(box.conf[0])
+                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 230, 60), 2)
+                            cv2.putText(frame, f"cat  {conf:.0%}", (x1, max(y1 - 8, 18)),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 230, 60), 2, cv2.LINE_AA)
 
                 # ---- state: cat visible on screen ----
                 if detected and not prev_detected:
