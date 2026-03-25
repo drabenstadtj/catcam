@@ -6,6 +6,8 @@ import subprocess
 import threading
 from collections import deque
 
+import requests
+
 import cv2
 import numpy as np
 from flask import Flask, Response, render_template, jsonify, send_from_directory
@@ -30,6 +32,8 @@ LOG_FILE     = "/data/detections.log"
 CLIPS_DIR    = "/data/clips"
 PRE_ROLL     = 30           # seconds of footage saved before first detection
 POST_ROLL    = 30           # seconds of footage saved after last detection
+DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "")
+DISCORD_MAX_MB  = 25        # Discord free tier file size limit
 
 # ---------------------------------------------------------------------------
 # Shared state
@@ -73,6 +77,28 @@ def _log_event(msg: str) -> None:
     with open(LOG_FILE, "a") as fh:
         fh.write(entry)
     log.info(entry.strip())
+
+
+def _discord_notify(message: str, file_path: str | None = None) -> None:
+    if not DISCORD_WEBHOOK:
+        return
+    try:
+        if file_path and os.path.exists(file_path):
+            size_mb = os.path.getsize(file_path) / (1024 * 1024)
+            if size_mb <= DISCORD_MAX_MB:
+                with open(file_path, "rb") as fh:
+                    requests.post(
+                        DISCORD_WEBHOOK,
+                        data={"content": message},
+                        files={"file": (os.path.basename(file_path), fh, "video/mp4")},
+                        timeout=30,
+                    )
+                return
+            else:
+                message += f"\n_(clip too large to attach: {size_mb:.0f} MB)_"
+        requests.post(DISCORD_WEBHOOK, json={"content": message}, timeout=10)
+    except Exception as exc:
+        log.warning("Discord notify failed: %s", exc)
 
 
 def _encode_jpeg(frame: np.ndarray) -> bytes:
@@ -186,6 +212,11 @@ def _stream_worker() -> None:
                             _state["count"] += 1
                             count_snap = _state["count"]
                         _log_event(f"Session {count_snap} started — clip: {os.path.basename(clip_path)}")
+                        threading.Thread(
+                            target=_discord_notify,
+                            args=(f"🐱 Cat detected! (session #{count_snap})",),
+                            daemon=True,
+                        ).start()
 
                 if clip_writer is not None:
                     clip_writer.write(frame)
@@ -193,6 +224,11 @@ def _stream_worker() -> None:
                         clip_writer.release()
                         clip_writer = None
                         _log_event(f"Session {count_snap} ended — saved: {os.path.basename(clip_path)}")
+                        threading.Thread(
+                            target=_discord_notify,
+                            args=(f"Session #{count_snap} ended — clip attached", clip_path),
+                            daemon=True,
+                        ).start()
 
                 with _frame_lock:
                     _latest_frame = frame

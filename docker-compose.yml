@@ -6,6 +6,8 @@ services:
       - "8080:8080/tcp"   # Web interface
     volumes:
       - catcam_data:/data  # Persistent detection log
+    environment:
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
     restart: unless-stopped
 
 volumes:
