@@ -15,5 +15,8 @@ services:
       - POST_ROLL=5
       - HWACCEL=qsv
       - INFER_EVERY=3
+      - OMP_NUM_THREADS=2
+      - MKL_NUM_THREADS=2
+      - INFER_DEVICE=GPU
     restart: unless-stopped
 networks: {}

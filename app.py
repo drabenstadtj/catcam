@@ -34,7 +34,8 @@ PRE_ROLL     = int(os.environ.get("PRE_ROLL",  30))  # seconds before first dete
 POST_ROLL    = int(os.environ.get("POST_ROLL", 30))  # seconds after last detection
 INFER_EVERY  = int(os.environ.get("INFER_EVERY", 3)) # run YOLO on every Nth frame
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "")
-HWACCEL         = os.environ.get("HWACCEL", "qsv")   # qsv | cpu
+HWACCEL         = os.environ.get("HWACCEL", "qsv")      # qsv | cpu
+INFER_DEVICE    = os.environ.get("INFER_DEVICE", "CPU")  # CPU | GPU (OpenVINO)
 DISCORD_MAX_MB  = 25        # Discord free tier file size limit
 
 # ---------------------------------------------------------------------------
@@ -227,8 +228,15 @@ def _ffmpeg_cmd() -> list[str]:
 def _stream_worker() -> None:
     global _latest_frame
 
-    log.info("Loading YOLOv8 model (%s)...", MODEL_PATH)
-    model = YOLO(MODEL_PATH)
+    log.info("Loading YOLOv8 model (%s) on device=%s...", MODEL_PATH, INFER_DEVICE)
+    if INFER_DEVICE == "GPU":
+        ov_path = MODEL_PATH.replace(".pt", "_openvino_model")
+        if not os.path.exists(ov_path):
+            log.info("Exporting model to OpenVINO format...")
+            YOLO(MODEL_PATH).export(format="openvino")
+        model = YOLO(ov_path)
+    else:
+        model = YOLO(MODEL_PATH)
     log.info("Model ready.")
 
     frame_bytes = FRAME_WIDTH * FRAME_HEIGHT * 3
@@ -268,7 +276,7 @@ def _stream_worker() -> None:
                 # ---- inference (throttled) ----
                 frame_count += 1
                 if frame_count % INFER_EVERY == 0:
-                    results = model(frame, classes=[CAT_CLASS_ID], verbose=False)
+                    results = model(frame, classes=[CAT_CLASS_ID], verbose=False, device=INFER_DEVICE)
                     detected = False
                     for r in results:
                         for box in r.boxes:
