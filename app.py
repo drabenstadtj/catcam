@@ -154,6 +154,10 @@ class ClipWriter:
 
         # Stream-copy into final path with moov atom at the front.
         # No re-encoding — this completes in under a second for most clips.
+        if not os.path.exists(self._tmp):
+            log.warning("Clip encoder produced no output — skipping %s", self.path)
+            return
+
         r = subprocess.run(
             ["ffmpeg", "-y", "-loglevel", "error",
              "-i", self._tmp,
@@ -165,7 +169,8 @@ class ClipWriter:
             os.remove(self._tmp)
         else:
             log.warning("Faststart pass failed — falling back to non-faststart clip")
-            os.rename(self._tmp, self.path)
+            if os.path.exists(self._tmp):
+                os.rename(self._tmp, self.path)
 
 
 # ---------------------------------------------------------------------------
