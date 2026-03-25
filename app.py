@@ -128,7 +128,7 @@ class ClipWriter:
         self.path = path                # final .mp4 (written by release())
         self._tmp  = path + ".tmp"      # intermediate H.264 file
         cmd = [
-            "ffmpeg", "-y", "-loglevel", "error",
+            "ffmpeg", "-y", "-loglevel", "warning",
             "-f", "rawvideo", "-pix_fmt", "bgr24",
             "-s", f"{FRAME_WIDTH}x{FRAME_HEIGHT}",
             "-r", str(STREAM_FPS),
@@ -155,11 +155,14 @@ class ClipWriter:
             self._proc.stdin.close()
         except Exception:
             pass
+        returncode = None
         try:
             _, stderr_data = self._proc.communicate(timeout=30)
+            returncode = self._proc.returncode
             if stderr_data:
-                log.warning("ClipWriter FFmpeg: %s", stderr_data.decode(errors="replace").strip())
-        except Exception:
+                log.warning("ClipWriter FFmpeg stderr: %s", stderr_data.decode(errors="replace").strip())
+        except Exception as e:
+            log.warning("ClipWriter FFmpeg communicate() failed: %s", e)
             self._proc.kill()
             try:
                 self._proc.wait(timeout=5)
@@ -169,7 +172,7 @@ class ClipWriter:
         # Stream-copy into final path with moov atom at the front.
         # No re-encoding — this completes in under a second for most clips.
         if not os.path.exists(self._tmp) or os.path.getsize(self._tmp) == 0:
-            log.warning("Clip encoder produced no output — skipping %s", self.path)
+            log.warning("Clip encoder produced no output (exit code %s) — skipping %s", returncode, self.path)
             if os.path.exists(self._tmp):
                 os.remove(self._tmp)
             return False
