@@ -1,13 +1,14 @@
 FROM python:3.11-slim
 
 # System deps: FFmpeg + OpenCV native libs
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN sed -i 's/^Components: main$/Components: main non-free non-free-firmware/' /etc/apt/sources.list.d/debian.sources && \
+    apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         libgl1 \
         libglib2.0-0 \
         libsm6 \
         libxext6 \
-        intel-media-va-driver-non-free \
+        intel-media-va-driver \
         libva-drm2 \
     && rm -rf /var/lib/apt/lists/*
 
