@@ -111,8 +111,22 @@ def _encode_jpeg(frame: np.ndarray) -> bytes:
 # are immediately playable in browsers and Discord without a remux step.
 # ---------------------------------------------------------------------------
 class ClipWriter:
+    """Writes BGR frames to an H.264 MP4 with proper faststart metadata.
+
+    Two-pass approach:
+      1. Pipe raw frames into FFmpeg → H.264 .tmp file (no faststart yet,
+         because FFmpeg can't seek a pipe-fed output to rewrite the header).
+      2. On release(): stream-copy the .tmp into the final .mp4 with
+         +faststart, then delete the .tmp.
+
+    This guarantees Discord and browsers can seek the file and show duration.
+    The .tmp file is never listed on the clips page so partial clips don't appear.
+    """
+
     def __init__(self, path: str) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        self.path = path                # final .mp4 (written by release())
+        self._tmp  = path + ".tmp"      # intermediate H.264 file
         cmd = [
             "ffmpeg", "-y", "-loglevel", "error",
             "-f", "rawvideo", "-pix_fmt", "bgr24",
@@ -120,11 +134,9 @@ class ClipWriter:
             "-r", str(STREAM_FPS),
             "-i", "pipe:0",
             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-            "-movflags", "+faststart",
-            path,
+            self._tmp,
         ]
         self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        self.path = path
 
     def write(self, frame: np.ndarray) -> None:
         try:
@@ -133,12 +145,27 @@ class ClipWriter:
             pass
 
     def release(self) -> None:
-        """Close stdin and wait for FFmpeg to finish writing the file."""
+        """Finalise the clip: flush FFmpeg, then apply faststart via stream copy."""
         try:
             self._proc.stdin.close()
         except Exception:
             pass
         self._proc.wait()
+
+        # Stream-copy into final path with moov atom at the front.
+        # No re-encoding — this completes in under a second for most clips.
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error",
+             "-i", self._tmp,
+             "-c", "copy", "-movflags", "+faststart",
+             self.path],
+            timeout=120,
+        )
+        if r.returncode == 0:
+            os.remove(self._tmp)
+        else:
+            log.warning("Faststart pass failed — falling back to non-faststart clip")
+            os.rename(self._tmp, self.path)
 
 
 # ---------------------------------------------------------------------------
