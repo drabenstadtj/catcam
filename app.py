@@ -157,12 +157,12 @@ class ClipWriter:
             pass
         returncode = None
         try:
-            _, stderr_data = self._proc.communicate(timeout=30)
-            returncode = self._proc.returncode
+            stderr_data = self._proc.stderr.read()
+            returncode = self._proc.wait(timeout=30)
             if stderr_data:
                 log.warning("ClipWriter FFmpeg stderr: %s", stderr_data.decode(errors="replace").strip())
         except Exception as e:
-            log.warning("ClipWriter FFmpeg communicate() failed: %s", e)
+            log.warning("ClipWriter FFmpeg wait failed: %s", e)
             self._proc.kill()
             try:
                 self._proc.wait(timeout=5)
