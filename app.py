@@ -136,9 +136,11 @@ class ClipWriter:
             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
             self._tmp,
         ]
-        self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
 
     def write(self, frame: np.ndarray) -> None:
+        if self._proc.poll() is not None:   # process already dead
+            return
         try:
             self._proc.stdin.write(frame.tobytes())
         except BrokenPipeError:
@@ -150,12 +152,16 @@ class ClipWriter:
             self._proc.stdin.close()
         except Exception:
             pass
-        self._proc.wait()
+        _, stderr_data = self._proc.communicate()
+        if stderr_data:
+            log.warning("ClipWriter FFmpeg: %s", stderr_data.decode(errors="replace").strip())
 
         # Stream-copy into final path with moov atom at the front.
         # No re-encoding — this completes in under a second for most clips.
-        if not os.path.exists(self._tmp):
+        if not os.path.exists(self._tmp) or os.path.getsize(self._tmp) == 0:
             log.warning("Clip encoder produced no output — skipping %s", self.path)
+            if os.path.exists(self._tmp):
+                os.remove(self._tmp)
             return
 
         r = subprocess.run(
