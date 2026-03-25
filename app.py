@@ -107,12 +107,38 @@ def _encode_jpeg(frame: np.ndarray) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# Clip recording
+# Clip recording — writes H.264/faststart directly via FFmpeg pipe so clips
+# are immediately playable in browsers and Discord without a remux step.
 # ---------------------------------------------------------------------------
-def _new_clip_writer(path: str) -> cv2.VideoWriter:
-    os.makedirs(CLIPS_DIR, exist_ok=True)
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    return cv2.VideoWriter(path, fourcc, float(STREAM_FPS), (FRAME_WIDTH, FRAME_HEIGHT))
+class ClipWriter:
+    def __init__(self, path: str) -> None:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        cmd = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "rawvideo", "-pix_fmt", "bgr24",
+            "-s", f"{FRAME_WIDTH}x{FRAME_HEIGHT}",
+            "-r", str(STREAM_FPS),
+            "-i", "pipe:0",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-movflags", "+faststart",
+            path,
+        ]
+        self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        self.path = path
+
+    def write(self, frame: np.ndarray) -> None:
+        try:
+            self._proc.stdin.write(frame.tobytes())
+        except BrokenPipeError:
+            pass
+
+    def release(self) -> None:
+        """Close stdin and wait for FFmpeg to finish writing the file."""
+        try:
+            self._proc.stdin.close()
+        except Exception:
+            pass
+        self._proc.wait()
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +166,7 @@ def _stream_worker() -> None:
     # At ~20 KB/frame, 30 s × 15 fps = 450 frames ≈ 9 MB.
     pre_buffer: deque[bytes] = deque(maxlen=PRE_ROLL * STREAM_FPS)
 
-    clip_writer: cv2.VideoWriter | None = None
+    clip_writer: ClipWriter | None = None
     record_until: float = 0.0   # epoch time — keep recording until this
 
     while True:
@@ -200,7 +226,7 @@ def _stream_worker() -> None:
                     if clip_writer is None:
                         ts_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                         clip_path = os.path.join(CLIPS_DIR, f"cat_{ts_str}.mp4")
-                        clip_writer = _new_clip_writer(clip_path)
+                        clip_writer = ClipWriter(clip_path)
                         # Flush pre-roll buffer so clip starts before detection
                         for jpeg_bytes in pre_buffer:
                             decoded = cv2.imdecode(
