@@ -234,7 +234,7 @@ def _stream_worker() -> None:
         if not os.path.exists(ov_path):
             log.info("Exporting model to OpenVINO format...")
             YOLO(MODEL_PATH).export(format="openvino")
-        model = YOLO(ov_path)
+        model = YOLO(ov_path, task="detect")
     else:
         model = YOLO(MODEL_PATH)
     log.info("Model ready.")
@@ -276,7 +276,7 @@ def _stream_worker() -> None:
                 # ---- inference (throttled) ----
                 frame_count += 1
                 if frame_count % INFER_EVERY == 0:
-                    results = model(frame, classes=[CAT_CLASS_ID], verbose=False, device=INFER_DEVICE)
+                    results = model(frame, classes=[CAT_CLASS_ID], verbose=False)
                     detected = False
                     for r in results:
                         for box in r.boxes:
