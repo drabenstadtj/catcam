@@ -226,4 +226,4 @@ if __name__ == "__main__":
     worker = threading.Thread(target=_stream_worker, daemon=True, name="stream-worker")
     worker.start()
 
-    socketio.run(app, host="0.0.0.0", port=8080, debug=False, use_reloader=False)
+    socketio.run(app, host="0.0.0.0", port=8080, debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
