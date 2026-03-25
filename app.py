@@ -30,8 +30,8 @@ CAT_CLASS_ID = 15           # COCO class 15 = cat
 MODEL_PATH   = "yolov8n.pt"
 LOG_FILE     = "/data/detections.log"
 CLIPS_DIR    = "/data/clips"
-PRE_ROLL     = 30           # seconds of footage saved before first detection
-POST_ROLL    = 30           # seconds of footage saved after last detection
+PRE_ROLL     = int(os.environ.get("PRE_ROLL",  30))  # seconds before first detection
+POST_ROLL    = int(os.environ.get("POST_ROLL", 30))  # seconds after last detection
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "")
 DISCORD_MAX_MB  = 25        # Discord free tier file size limit
 
@@ -134,7 +134,7 @@ class ClipWriter:
             "-r", str(STREAM_FPS),
             "-i", "pipe:0",
             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-            self._tmp,
+            "-f", "mp4", self._tmp,
         ]
         self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
 
@@ -290,11 +290,6 @@ def _stream_worker() -> None:
                             _state["count"] += 1
                             count_snap = _state["count"]
                         _log_event(f"Session {count_snap} started — clip: {os.path.basename(clip_path)}")
-                        threading.Thread(
-                            target=_discord_notify,
-                            args=(f"🐱 Cat detected! (session #{count_snap})",),
-                            daemon=True,
-                        ).start()
 
                 if clip_writer is not None:
                     clip_writer.write(frame)
