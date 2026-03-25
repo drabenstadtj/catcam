@@ -33,6 +33,7 @@ CLIPS_DIR    = "/data/clips"
 PRE_ROLL     = int(os.environ.get("PRE_ROLL",  30))  # seconds before first detection
 POST_ROLL    = int(os.environ.get("POST_ROLL", 30))  # seconds after last detection
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "")
+HWACCEL         = os.environ.get("HWACCEL", "qsv")   # qsv | cpu
 DISCORD_MAX_MB  = 25        # Discord free tier file size limit
 
 # ---------------------------------------------------------------------------
@@ -127,17 +128,30 @@ class ClipWriter:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self.path = path                # final .mp4 (written by release())
         self._tmp  = path + ".tmp"      # intermediate H.264 file
-        cmd = [
-            "ffmpeg", "-y", "-loglevel", "warning",
-            "-f", "rawvideo", "-pix_fmt", "bgr24",
-            "-s", f"{FRAME_WIDTH}x{FRAME_HEIGHT}",
-            "-r", str(STREAM_FPS),
-            "-i", "pipe:0",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-            "-pix_fmt", "yuv420p",
-            "-profile:v", "baseline", "-level", "3.0",
-            "-f", "mp4", self._tmp,
-        ]
+        if HWACCEL == "qsv":
+            cmd = [
+                "ffmpeg", "-y", "-loglevel", "warning",
+                "-init_hw_device", "qsv=hw",
+                "-f", "rawvideo", "-pix_fmt", "bgr24",
+                "-s", f"{FRAME_WIDTH}x{FRAME_HEIGHT}",
+                "-r", str(STREAM_FPS),
+                "-i", "pipe:0",
+                "-vf", "format=nv12,hwupload=extra_hw_frames=64",
+                "-c:v", "h264_qsv", "-global_quality", "23",
+                "-f", "mp4", self._tmp,
+            ]
+        else:
+            cmd = [
+                "ffmpeg", "-y", "-loglevel", "warning",
+                "-f", "rawvideo", "-pix_fmt", "bgr24",
+                "-s", f"{FRAME_WIDTH}x{FRAME_HEIGHT}",
+                "-r", str(STREAM_FPS),
+                "-i", "pipe:0",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                "-pix_fmt", "yuv420p",
+                "-profile:v", "baseline", "-level", "3.0",
+                "-f", "mp4", self._tmp,
+            ]
         self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
 
     def write(self, frame: np.ndarray) -> None:

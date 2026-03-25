@@ -1,13 +1,18 @@
 services:
   catcam:
+    container_name: catcam
     build: .
     ports:
-      - "5000:5000/udp"   # Incoming MPEG-TS stream from Pi
-      - "8087:8080/tcp"   # Web interface
+      - 5000:5000/udp # Incoming MPEG-TS stream from Pi
+      - 8087:8080/tcp # Web interface
     volumes:
-      - ./data:/data  # Persistent detection log
+      - ./data:/data # Persistent detection log
+    devices:
+      - /dev/dri:/dev/dri
     environment:
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
+      - PRE_ROLL=5
+      - POST_ROLL=5
+      - HWACCEL=qsv
     restart: unless-stopped
-
-
+networks: {}
