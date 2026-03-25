@@ -134,6 +134,8 @@ class ClipWriter:
             "-r", str(STREAM_FPS),
             "-i", "pipe:0",
             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-profile:v", "baseline", "-level", "3.0",
             "-f", "mp4", self._tmp,
         ]
         self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -178,16 +180,18 @@ class ClipWriter:
             return False
 
         r = subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error",
+            ["ffmpeg", "-y", "-loglevel", "warning",
              "-i", self._tmp,
              "-c", "copy", "-movflags", "+faststart",
              self.path],
+            capture_output=True,
             timeout=120,
         )
         if r.returncode == 0:
             os.remove(self._tmp)
         else:
-            log.warning("Faststart pass failed — falling back to non-faststart clip")
+            log.warning("Faststart pass failed (exit %d): %s — falling back to non-faststart clip",
+                        r.returncode, r.stderr.decode(errors="replace").strip())
             if os.path.exists(self._tmp):
                 os.rename(self._tmp, self.path)
         return True
