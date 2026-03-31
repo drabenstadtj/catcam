@@ -10,6 +10,7 @@ services:
       - ./cat_classifier.pt:/app/cat_classifier.pt
       - "./cat images:/app/cat images"
       - ./discord_feedback:/app/discord_feedback 
+      - ./false_positives:/app/cat_images/false_positives  
     devices:
       - /dev/dri:/dev/dri
     environment:

@@ -40,7 +40,6 @@ CLIPS_DIR    = "/data/clips"
 PRE_ROLL     = int(os.environ.get("PRE_ROLL",  30))  # seconds before first detection
 POST_ROLL    = int(os.environ.get("POST_ROLL", 30))  # seconds after last detection
 INFER_EVERY  = int(os.environ.get("INFER_EVERY", 3))    # run YOLO on every Nth frame
-CONF_THRESH  = float(os.environ.get("CONF_THRESH", 0.15)) # detection confidence threshold
 DISCORD_WEBHOOK    = os.environ.get("DISCORD_WEBHOOK_URL", "")
 DISCORD_BOT_TOKEN  = os.environ.get("DISCORD_BOT_TOKEN", "")
 DISCORD_CHANNEL_ID = "1486458529417138356"
@@ -49,12 +48,37 @@ INFER_DEVICE       = os.environ.get("INFER_DEVICE", "CPU")  # CPU | GPU (OpenVIN
 DISCORD_MAX_MB     = 25        # Discord free tier file size limit
 
 # Feedback emojis — order matches CATS in train_classifier.py: bonnie, jinny, louise
-_FEEDBACK_EMOJIS  = [("🩶", "bonnie"), ("🟤", "jinny"), ("⚫", "louise")]
+_FEEDBACK_EMOJIS  = [("🩶", "bonnie"), ("🟤", "jinny"), ("⚫", "louise"), ("❌", "not_a_cat")]
 _RETRAIN_AFTER    = 5   # retrain after this many new labeled samples arrive
+_FALSE_POSITIVE_THRESHOLD = 3  # Number of "not a cat" reactions before taking action
+_false_positive_samples: list[dict] = []  # Track false positives
 
 _pending_feedback: list[dict] = []   # {message_id, snap_bytes, predicted, ts}
 _pending_lock     = threading.Lock()
 _new_sample_count = 0
+
+CONF_THRESH = float(os.environ.get("CONF_THRESH", 0.15))
+_MIN_CONF_THRESH = 0.10  # Minimum allowed confidence
+_MAX_CONF_THRESH = 0.30  # Maximum allowed confidence
+
+# Add a function to adjust confidence
+def _adjust_confidence() -> None:
+    """Dynamically adjust confidence threshold based on false positive rate."""
+    global CONF_THRESH
+    
+    # Get recent detection stats from logs
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE, "r") as f:
+            lines = f.readlines()[-100:]  # Last 100 events
+            
+        false_pos_rate = len(_false_positive_samples) / max(1, len([l for l in lines if "Session" in l]))
+        
+        if false_pos_rate > 0.3:  # More than 30% false positives
+            CONF_THRESH = min(CONF_THRESH + 0.02, _MAX_CONF_THRESH)
+            log.info("Increasing confidence threshold to %.2f due to high false positive rate", CONF_THRESH)
+        elif false_pos_rate < 0.05 and CONF_THRESH > _MIN_CONF_THRESH:  # Very few false positives
+            CONF_THRESH = max(CONF_THRESH - 0.01, _MIN_CONF_THRESH)
+            log.info("Decreasing confidence threshold to %.2f due to low false positive rate", CONF_THRESH)
 
 # ---------------------------------------------------------------------------
 # Shared state
@@ -204,28 +228,63 @@ def _run_discord_bot() -> None:
 
 
 def _save_feedback_sample(snap_bytes: bytes, cat: str, predicted: str) -> None:
-    folder = os.path.join("cat images", cat)
+    # Handle "not a cat" feedback specially
+    if cat == "not_a_cat":
+        # Use absolute path for better persistence
+        folder = os.path.join("/data", "false_positives")  # Changed to /data
+        os.makedirs(folder, exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        path = os.path.join(folder, f"false_positive_{ts}.jpg")
+        with open(path, "wb") as fh:
+            fh.write(snap_bytes)
+        
+        # Track false positives for analysis
+        with _pending_lock:
+            _false_positive_samples.append({
+                "path": path,
+                "predicted": predicted,
+                "ts": time.time()
+            })
+        
+        log.info("False positive recorded: predicted %s — saved to %s", predicted, path)
+        
+        if len(_false_positive_samples) >= _FALSE_POSITIVE_THRESHOLD:
+            threading.Thread(target=_analyze_false_positives, daemon=True).start()
+        return
+    
+    # For real cats, use /data/cat_images for persistence
+    folder = os.path.join("/data", "cat_images", cat)  # Changed to /data
     os.makedirs(folder, exist_ok=True)
-    ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     path = os.path.join(folder, f"feedback_{ts}.jpg")
     with open(path, "wb") as fh:
         fh.write(snap_bytes)
     action = "confirmed" if cat == predicted else f"corrected {predicted} → {cat}"
     log.info("Feedback: %s (%s) — saved to %s", cat, action, path)
 
-
-def _retrain_classifier() -> None:
-    log.info("Retraining classifier with new feedback samples...")
-    try:
-        subprocess.run(
-            ["python", "train_classifier.py"],
-            check=True, timeout=300,
-        )
-        _load_classifier()
-        log.info("Classifier retrained and reloaded.")
-    except Exception as exc:
-        log.warning("Retrain failed: %s", exc)
-
+def _analyze_false_positives() -> None:
+    """Analyze false positives and potentially adjust confidence threshold."""
+    log.info("Analyzing %d false positive samples...", len(_false_positive_samples))
+    
+    false_pos_path = "/data/false_positives.log"
+    with open(false_pos_path, "a") as f:
+        for fp in _false_positive_samples:
+            f.write(f"{datetime.datetime.fromtimestamp(fp['ts'])}: {fp['predicted']}\n")
+    
+    # Add this line to adjust confidence based on false positives
+    _adjust_confidence()
+    
+    # Optional: Send notification about false positives
+    if DISCORD_WEBHOOK:
+        try:
+            message = f"⚠️ {len(_false_positive_samples)} false positive detections recorded. Check `/data/false_positives.log`"
+            requests.post(DISCORD_WEBHOOK, json={"content": message}, timeout=10)
+        except:
+            pass
+    
+    # Clear the list after analysis
+    with _pending_lock:
+        _false_positive_samples.clear()
 
 CLASSIFIER_PATH = "cat_classifier.pt"
 _classifier       = None
@@ -268,6 +327,25 @@ def _encode_jpeg(frame: np.ndarray) -> bytes:
     _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
     return buf.tobytes()
 
+def _cleanup_old_false_positives(max_age_days=1):
+    """Delete false positive images older than max_age_days."""
+    folder = os.path.join("/data", "false_positives")
+    if not os.path.exists(folder):
+        return
+    
+    now = time.time()
+    for filename in os.listdir(folder):
+        if filename.startswith("false_positive_") and filename.endswith(".jpg"):
+            filepath = os.path.join(folder, filename)
+            try:
+                # Extract timestamp from filename: false_positive_YYYYMMDD_HHMMSS_ffffff.jpg
+                ts_str = filename.replace("false_positive_", "").replace(".jpg", "").split("_")[0]
+                file_time = datetime.datetime.strptime(ts_str, "%Y%m%d%H%M%S").timestamp()
+                if (now - file_time) > (max_age_days * 86400):
+                    os.remove(filepath)
+                    log.info("Removed old false positive: %s", filename)
+            except Exception as e:
+                log.warning("Failed to cleanup %s: %s", filename, e)
 
 # ---------------------------------------------------------------------------
 # Clip recording — writes H.264/faststart directly via FFmpeg pipe so clips
@@ -596,6 +674,30 @@ def serve_clip(filename):
     filename = os.path.basename(filename)   # prevent path traversal
     return send_from_directory(CLIPS_DIR, filename, mimetype="video/mp4")
 
+@app.route("/false_positives")
+def false_positives_page():
+    """View false positives for manual review."""
+    fps = []
+    folder = os.path.join("/data", "false_positives")
+    if os.path.exists(folder):
+        for fname in sorted(os.listdir(folder), reverse=True):
+            if fname.endswith(".jpg"):
+                path = os.path.join(folder, fname)
+                size_kb = os.path.getsize(path) / 1024
+                try:
+                    ts = datetime.datetime.strptime(fname, "false_positive_%Y%m%d_%H%M%S_%f.jpg")
+                    label = ts.strftime("%d %b %Y  %H:%M:%S")
+                except ValueError:
+                    label = fname
+                fps.append({"name": fname, "label": label, "size_kb": f"{size_kb:.1f}"})
+    return render_template("false_positives.html", fps=fps)
+
+@app.route("/false_positives/<path:filename>")
+def serve_false_positive(filename):
+    """Serve false positive images."""
+    filename = os.path.basename(filename)  # Prevent path traversal
+    folder = os.path.join("/data", "false_positives")
+    return send_from_directory(folder, filename, mimetype="image/jpeg")
 
 # ---------------------------------------------------------------------------
 # Entry point
@@ -603,6 +705,7 @@ def serve_clip(filename):
 if __name__ == "__main__":
     os.makedirs("/data", exist_ok=True)
     os.makedirs(CLIPS_DIR, exist_ok=True)
+    _cleanup_old_false_positives()
     _load_classifier()
     threading.Thread(target=_stream_worker,  daemon=True, name="stream-worker").start()
     if DISCORD_BOT_TOKEN:
