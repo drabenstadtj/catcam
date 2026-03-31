@@ -4,6 +4,7 @@ import datetime
 import logging
 import subprocess
 import threading
+import urllib.parse
 from collections import deque
 
 import requests
@@ -37,10 +38,20 @@ PRE_ROLL     = int(os.environ.get("PRE_ROLL",  30))  # seconds before first dete
 POST_ROLL    = int(os.environ.get("POST_ROLL", 30))  # seconds after last detection
 INFER_EVERY  = int(os.environ.get("INFER_EVERY", 3))    # run YOLO on every Nth frame
 CONF_THRESH  = float(os.environ.get("CONF_THRESH", 0.15)) # detection confidence threshold
-DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "")
-HWACCEL         = os.environ.get("HWACCEL", "qsv")      # qsv | cpu
-INFER_DEVICE    = os.environ.get("INFER_DEVICE", "CPU")  # CPU | GPU (OpenVINO)
-DISCORD_MAX_MB  = 25        # Discord free tier file size limit
+DISCORD_WEBHOOK    = os.environ.get("DISCORD_WEBHOOK_URL", "")
+DISCORD_BOT_TOKEN  = os.environ.get("DISCORD_BOT_TOKEN", "")
+DISCORD_CHANNEL_ID = "727965875138723943"
+HWACCEL            = os.environ.get("HWACCEL", "qsv")      # qsv | cpu
+INFER_DEVICE       = os.environ.get("INFER_DEVICE", "CPU")  # CPU | GPU (OpenVINO)
+DISCORD_MAX_MB     = 25        # Discord free tier file size limit
+
+# Feedback emojis — order matches CATS in train_classifier.py: bonnie, jinny, louise
+_FEEDBACK_EMOJIS  = [("🩶", "bonnie"), ("🟤", "jinny"), ("⚫", "louise")]
+_RETRAIN_AFTER    = 5   # retrain after this many new labeled samples arrive
+
+_pending_feedback: list[dict] = []   # {message_id, snap_bytes, predicted, ts}
+_pending_lock     = threading.Lock()
+_new_sample_count = 0
 
 # ---------------------------------------------------------------------------
 # Shared state
@@ -86,17 +97,31 @@ def _log_event(msg: str) -> None:
     log.info(entry.strip())
 
 
-def _discord_notify(message: str, file_path: str | None = None, jpeg_bytes: bytes | None = None) -> None:
+def _discord_notify(message: str, file_path: str | None = None,
+                    jpeg_bytes: bytes | None = None, predicted: str | None = None) -> None:
     if not DISCORD_WEBHOOK:
         return
     try:
         if jpeg_bytes:
-            requests.post(
-                DISCORD_WEBHOOK,
+            # Use ?wait=true so Discord returns the message object (we need the ID for reactions)
+            url = DISCORD_WEBHOOK + ("&wait=true" if "?" in DISCORD_WEBHOOK else "?wait=true")
+            resp = requests.post(
+                url,
                 data={"content": message},
                 files={"file": ("snapshot.jpg", jpeg_bytes, "image/jpeg")},
                 timeout=10,
             )
+            if DISCORD_BOT_TOKEN and predicted and resp.ok:
+                msg_id = resp.json().get("id")
+                if msg_id:
+                    _add_reactions(msg_id)
+                    with _pending_lock:
+                        _pending_feedback.append({
+                            "message_id": msg_id,
+                            "snap_bytes":  jpeg_bytes,
+                            "predicted":   predicted,
+                            "ts":          time.time(),
+                        })
             return
         if file_path and os.path.exists(file_path):
             size_mb = os.path.getsize(file_path) / (1024 * 1024)
@@ -114,6 +139,87 @@ def _discord_notify(message: str, file_path: str | None = None, jpeg_bytes: byte
         requests.post(DISCORD_WEBHOOK, json={"content": message}, timeout=10)
     except Exception as exc:
         log.warning("Discord notify failed: %s", exc)
+
+
+def _add_reactions(message_id: str) -> None:
+    """Add the three feedback emoji reactions to a message via the bot token."""
+    headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
+    for emoji, _ in _FEEDBACK_EMOJIS:
+        encoded = urllib.parse.quote(emoji)
+        url = (f"https://discord.com/api/v10/channels/{DISCORD_CHANNEL_ID}"
+               f"/messages/{message_id}/reactions/{encoded}/@me")
+        try:
+            requests.put(url, headers=headers, timeout=10)
+            time.sleep(0.3)   # stay well inside Discord's rate limit
+        except Exception as exc:
+            log.warning("Failed to add reaction %s: %s", emoji, exc)
+
+
+def _poll_feedback_worker() -> None:
+    """Background thread: checks for human reactions every 30 s, saves samples, triggers retrain."""
+    global _new_sample_count
+    TTL = 300   # stop watching a message after 5 minutes
+    while True:
+        time.sleep(30)
+        if not DISCORD_BOT_TOKEN:
+            continue
+        now = time.time()
+        headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
+        with _pending_lock:
+            still_pending = []
+            for item in _pending_feedback:
+                if now - item["ts"] > TTL:
+                    continue
+                correction = _check_reactions(item["message_id"], headers)
+                if correction:
+                    _save_feedback_sample(item["snap_bytes"], correction, item["predicted"])
+                    _new_sample_count += 1
+                else:
+                    still_pending.append(item)
+            _pending_feedback[:] = still_pending
+
+        if _new_sample_count >= _RETRAIN_AFTER:
+            _new_sample_count = 0
+            threading.Thread(target=_retrain_classifier, daemon=True).start()
+
+
+def _check_reactions(message_id: str, headers: dict) -> str | None:
+    """Return the cat name if a human has reacted with a feedback emoji, else None."""
+    for emoji, cat in _FEEDBACK_EMOJIS:
+        encoded = urllib.parse.quote(emoji)
+        url = (f"https://discord.com/api/v10/channels/{DISCORD_CHANNEL_ID}"
+               f"/messages/{message_id}/reactions/{encoded}")
+        try:
+            r = requests.get(url, headers=headers, timeout=10)
+            if r.ok and len(r.json()) > 1:   # >1 means a human reacted (bot + human)
+                return cat
+        except Exception:
+            pass
+    return None
+
+
+def _save_feedback_sample(snap_bytes: bytes, cat: str, predicted: str) -> None:
+    folder = os.path.join("cat images", cat)
+    os.makedirs(folder, exist_ok=True)
+    ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    path = os.path.join(folder, f"feedback_{ts}.jpg")
+    with open(path, "wb") as fh:
+        fh.write(snap_bytes)
+    action = "confirmed" if cat == predicted else f"corrected {predicted} → {cat}"
+    log.info("Feedback: %s (%s) — saved to %s", cat, action, path)
+
+
+def _retrain_classifier() -> None:
+    log.info("Retraining classifier with new feedback samples...")
+    try:
+        subprocess.run(
+            ["python", "train_classifier.py"],
+            check=True, timeout=300,
+        )
+        _load_classifier()
+        log.info("Classifier retrained and reloaded.")
+    except Exception as exc:
+        log.warning("Retrain failed: %s", exc)
 
 
 CLASSIFIER_PATH = "cat_classifier.pt"
@@ -393,7 +499,7 @@ def _stream_worker() -> None:
                         threading.Thread(
                             target=_discord_notify,
                             args=(f"#{count_snap} {identity_snap} at {datetime.datetime.now().strftime('%H:%M:%S')}",),
-                            kwargs={"jpeg_bytes": snap_buf.tobytes()},
+                            kwargs={"jpeg_bytes": snap_buf.tobytes(), "predicted": identity_snap},
                             daemon=True,
                         ).start()
 
@@ -493,6 +599,7 @@ if __name__ == "__main__":
     os.makedirs("/data", exist_ok=True)
     os.makedirs(CLIPS_DIR, exist_ok=True)
     _load_classifier()
-    threading.Thread(target=_stream_worker, daemon=True, name="stream-worker").start()
+    threading.Thread(target=_stream_worker,       daemon=True, name="stream-worker").start()
+    threading.Thread(target=_poll_feedback_worker, daemon=True, name="feedback-poller").start()
     socketio.run(app, host="0.0.0.0", port=8080, debug=False,
                  use_reloader=False, allow_unsafe_werkzeug=True)
