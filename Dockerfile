@@ -21,6 +21,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application
 COPY app.py .
 COPY templates/ templates/
+COPY cat_classifier.pt .
 
 # Pre-download the YOLO model so first-run startup is fast.
 # Remove this RUN line if you prefer to download at runtime.

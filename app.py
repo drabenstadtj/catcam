@@ -10,6 +10,9 @@ import requests
 
 import cv2
 import numpy as np
+import torch
+from torchvision import models, transforms
+from PIL import Image
 from flask import Flask, Response, render_template, jsonify, send_from_directory
 from flask_socketio import SocketIO
 from ultralytics import YOLO
@@ -111,6 +114,43 @@ def _discord_notify(message: str, file_path: str | None = None, jpeg_bytes: byte
         requests.post(DISCORD_WEBHOOK, json={"content": message}, timeout=10)
     except Exception as exc:
         log.warning("Discord notify failed: %s", exc)
+
+
+CLASSIFIER_PATH = "cat_classifier.pt"
+_classifier       = None
+_classifier_classes: list[str] = []
+_classifier_tf    = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406],
+                         [0.229, 0.224, 0.225]),
+])
+
+
+def _load_classifier() -> None:
+    global _classifier, _classifier_classes
+    if not os.path.exists(CLASSIFIER_PATH):
+        log.info("No cat classifier found at %s — cat identity disabled. "
+                 "Run train_classifier.py to enable it.", CLASSIFIER_PATH)
+        return
+    checkpoint = torch.load(CLASSIFIER_PATH, map_location="cpu", weights_only=False)
+    _classifier_classes = checkpoint["classes"]
+    model = models.mobilenet_v2(weights=None)
+    model.classifier[1] = torch.nn.Linear(model.last_channel, len(_classifier_classes))
+    model.load_state_dict(checkpoint["state_dict"])
+    model.eval()
+    _classifier = model
+    log.info("Cat classifier loaded — classes: %s", _classifier_classes)
+
+
+def _identify_cat(roi: np.ndarray) -> str:
+    if _classifier is None or roi.size == 0:
+        return "cat"
+    img = Image.fromarray(cv2.cvtColor(roi, cv2.COLOR_BGR2RGB))
+    tensor = _classifier_tf(img).unsqueeze(0)
+    with torch.no_grad():
+        idx = _classifier(tensor).argmax(1).item()
+    return _classifier_classes[idx]
 
 
 def _encode_jpeg(frame: np.ndarray) -> bytes:
@@ -268,6 +308,7 @@ def _stream_worker() -> None:
     clip_writer: ClipWriter | None = None
     record_until: float = 0.0   # epoch time — keep recording until this
     session_start: float = 0.0
+    cat_votes: dict = {}        # identity → detection count this session
 
     while True:
         log.info("Starting FFmpeg — listening on udp://0.0.0.0:5000 ...")
@@ -304,8 +345,11 @@ def _stream_worker() -> None:
                             detected = True
                             x1, y1, x2, y2 = map(int, box.xyxy[0])
                             conf = float(box.conf[0])
+                            roi = frame[y1:y2, x1:x2]
+                            identity = _identify_cat(roi)
+                            cat_votes[identity] = cat_votes.get(identity, 0) + 1
                             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 230, 60), 2)
-                            cv2.putText(frame, f"cat  {conf:.0%}", (x1, max(y1 - 8, 18)),
+                            cv2.putText(frame, f"{identity}  {conf:.0%}", (x1, max(y1 - 8, 18)),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 230, 60), 2, cv2.LINE_AA)
 
                 # ---- state: cat visible on screen ----
@@ -329,6 +373,7 @@ def _stream_worker() -> None:
                     record_until = time.time() + POST_ROLL
                     if clip_writer is None:
                         session_start = time.time()
+                        cat_votes = {}
                         ts_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                         clip_path = os.path.join(CLIPS_DIR, f"cat_{ts_str}.mp4")
                         clip_writer = ClipWriter(clip_path)
@@ -344,9 +389,10 @@ def _stream_worker() -> None:
                             count_snap = _state["count"]
                         _log_event(f"Session {count_snap} started — clip: {os.path.basename(clip_path)}")
                         _, snap_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                        identity_snap = max(cat_votes, key=cat_votes.get) if cat_votes else "cat"
                         threading.Thread(
                             target=_discord_notify,
-                            args=(f"#{count_snap} at {datetime.datetime.now().strftime('%H:%M:%S')}",),
+                            args=(f"#{count_snap} {identity_snap} at {datetime.datetime.now().strftime('%H:%M:%S')}",),
                             kwargs={"jpeg_bytes": snap_buf.tobytes()},
                             daemon=True,
                         ).start()
@@ -355,12 +401,14 @@ def _stream_worker() -> None:
                     clip_writer.write(frame)
                     if time.time() > record_until:
                         saved = clip_writer.release()
+                        identity = max(cat_votes, key=cat_votes.get) if cat_votes else "cat"
                         clip_writer = None
+                        cat_votes = {}
                         if saved:
                             _log_event(f"Session {count_snap} ended — saved: {os.path.basename(clip_path)}")
                             threading.Thread(
                                 target=_discord_notify,
-                                args=(f"#{count_snap} at {datetime.datetime.now().strftime('%H:%M:%S')}, {round(time.time() - session_start)}s", clip_path),
+                                args=(f"#{count_snap} {identity} at {datetime.datetime.now().strftime('%H:%M:%S')}, {round(time.time() - session_start)}s", clip_path),
                                 daemon=True,
                             ).start()
                         else:
@@ -444,6 +492,7 @@ def serve_clip(filename):
 if __name__ == "__main__":
     os.makedirs("/data", exist_ok=True)
     os.makedirs(CLIPS_DIR, exist_ok=True)
+    _load_classifier()
     threading.Thread(target=_stream_worker, daemon=True, name="stream-worker").start()
     socketio.run(app, host="0.0.0.0", port=8080, debug=False,
                  use_reloader=False, allow_unsafe_werkzeug=True)

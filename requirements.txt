@@ -4,4 +4,5 @@ opencv-python-headless>=4.8
 ultralytics>=8.0
 numpy>=1.24
 requests>=2.31
+torchvision>=0.16
 openvino>=2024.0
