@@ -7,6 +7,9 @@ services:
       - 8087:8080/tcp # Web interface
     volumes:
       - ./data:/data # Persistent detection log
+      - ./cat_classifier.pt:/app/cat_classifier.pt
+      - "./cat images:/app/cat images"
+      - ./discord_feedback:/app/discord_feedback 
     devices:
       - /dev/dri:/dev/dri
     environment:
