@@ -4,10 +4,13 @@ import datetime
 import logging
 import subprocess
 import threading
-import urllib.parse
 from collections import deque
 
+import asyncio
+
+import discord
 import requests
+
 
 import cv2
 import numpy as np
@@ -141,61 +144,63 @@ def _discord_notify(message: str, file_path: str | None = None,
         log.warning("Discord notify failed: %s", exc)
 
 
-def _add_reactions(message_id: str) -> None:
-    """Add the three feedback emoji reactions to a message via the bot token."""
-    headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
-    for emoji, _ in _FEEDBACK_EMOJIS:
-        encoded = urllib.parse.quote(emoji)
-        url = (f"https://discord.com/api/v10/channels/{DISCORD_CHANNEL_ID}"
-               f"/messages/{message_id}/reactions/{encoded}/@me")
-        try:
-            requests.put(url, headers=headers, timeout=10)
-            time.sleep(0.3)   # stay well inside Discord's rate limit
-        except Exception as exc:
-            log.warning("Failed to add reaction %s: %s", emoji, exc)
+_bot_loop: asyncio.AbstractEventLoop | None = None
 
 
-def _poll_feedback_worker() -> None:
-    """Background thread: checks for human reactions every 30 s, saves samples, triggers retrain."""
-    global _new_sample_count
-    TTL = 300   # stop watching a message after 5 minutes
-    while True:
-        time.sleep(30)
-        if not DISCORD_BOT_TOKEN:
-            continue
-        now = time.time()
-        headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
+class _FeedbackBot(discord.Client):
+    async def on_ready(self):
+        log.info("Discord feedback bot ready (user: %s)", self.user)
+
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
+        if payload.user_id == self.user.id:
+            return
+        msg_id = str(payload.message_id)
+        emoji  = str(payload.emoji)
+        cat    = dict(_FEEDBACK_EMOJIS).get(emoji)
+        if not cat:
+            return
         with _pending_lock:
-            still_pending = []
-            for item in _pending_feedback:
-                if now - item["ts"] > TTL:
-                    continue
-                correction = _check_reactions(item["message_id"], headers)
-                if correction:
-                    _save_feedback_sample(item["snap_bytes"], correction, item["predicted"])
-                    _new_sample_count += 1
-                else:
-                    still_pending.append(item)
-            _pending_feedback[:] = still_pending
-
+            match = next((i for i in _pending_feedback if i["message_id"] == msg_id), None)
+            if match:
+                _pending_feedback.remove(match)
+            else:
+                return
+        _save_feedback_sample(match["snap_bytes"], cat, match["predicted"])
+        global _new_sample_count
+        _new_sample_count += 1
         if _new_sample_count >= _RETRAIN_AFTER:
             _new_sample_count = 0
             threading.Thread(target=_retrain_classifier, daemon=True).start()
 
 
-def _check_reactions(message_id: str, headers: dict) -> str | None:
-    """Return the cat name if a human has reacted with a feedback emoji, else None."""
-    for emoji, cat in _FEEDBACK_EMOJIS:
-        encoded = urllib.parse.quote(emoji)
-        url = (f"https://discord.com/api/v10/channels/{DISCORD_CHANNEL_ID}"
-               f"/messages/{message_id}/reactions/{encoded}")
+_feedback_bot: _FeedbackBot | None = None
+
+
+def _add_reactions(message_id: str) -> None:
+    if _feedback_bot is None or _bot_loop is None:
+        return
+
+    async def _do():
         try:
-            r = requests.get(url, headers=headers, timeout=10)
-            if r.ok and len(r.json()) > 1:   # >1 means a human reacted (bot + human)
-                return cat
-        except Exception:
-            pass
-    return None
+            ch  = _feedback_bot.get_channel(int(DISCORD_CHANNEL_ID)) or \
+                  await _feedback_bot.fetch_channel(int(DISCORD_CHANNEL_ID))
+            msg = await ch.fetch_message(int(message_id))
+            for emoji, _ in _FEEDBACK_EMOJIS:
+                await msg.add_reaction(emoji)
+        except Exception as exc:
+            log.warning("Failed to add reactions: %s", exc)
+
+    asyncio.run_coroutine_threadsafe(_do(), _bot_loop)
+
+
+def _run_discord_bot() -> None:
+    global _feedback_bot, _bot_loop
+    intents = discord.Intents.default()
+    intents.reactions = True
+    _feedback_bot = _FeedbackBot(intents=intents)
+    _bot_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(_bot_loop)
+    _bot_loop.run_until_complete(_feedback_bot.start(DISCORD_BOT_TOKEN))
 
 
 def _save_feedback_sample(snap_bytes: bytes, cat: str, predicted: str) -> None:
@@ -599,7 +604,8 @@ if __name__ == "__main__":
     os.makedirs("/data", exist_ok=True)
     os.makedirs(CLIPS_DIR, exist_ok=True)
     _load_classifier()
-    threading.Thread(target=_stream_worker,       daemon=True, name="stream-worker").start()
-    threading.Thread(target=_poll_feedback_worker, daemon=True, name="feedback-poller").start()
+    threading.Thread(target=_stream_worker,  daemon=True, name="stream-worker").start()
+    if DISCORD_BOT_TOKEN:
+        threading.Thread(target=_run_discord_bot, daemon=True, name="discord-bot").start()
     socketio.run(app, host="0.0.0.0", port=8080, debug=False,
                  use_reloader=False, allow_unsafe_werkzeug=True)
