@@ -32,7 +32,8 @@ LOG_FILE     = "/data/detections.log"
 CLIPS_DIR    = "/data/clips"
 PRE_ROLL     = int(os.environ.get("PRE_ROLL",  30))  # seconds before first detection
 POST_ROLL    = int(os.environ.get("POST_ROLL", 30))  # seconds after last detection
-INFER_EVERY  = int(os.environ.get("INFER_EVERY", 3)) # run YOLO on every Nth frame
+INFER_EVERY  = int(os.environ.get("INFER_EVERY", 3))    # run YOLO on every Nth frame
+CONF_THRESH  = float(os.environ.get("CONF_THRESH", 0.15)) # detection confidence threshold
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "")
 HWACCEL         = os.environ.get("HWACCEL", "qsv")      # qsv | cpu
 INFER_DEVICE    = os.environ.get("INFER_DEVICE", "CPU")  # CPU | GPU (OpenVINO)
@@ -266,6 +267,7 @@ def _stream_worker() -> None:
 
     clip_writer: ClipWriter | None = None
     record_until: float = 0.0   # epoch time — keep recording until this
+    session_start: float = 0.0
 
     while True:
         log.info("Starting FFmpeg — listening on udp://0.0.0.0:5000 ...")
@@ -295,7 +297,7 @@ def _stream_worker() -> None:
                 # ---- inference (throttled) ----
                 frame_count += 1
                 if frame_count % INFER_EVERY == 0:
-                    results = model(frame, classes=[CAT_CLASS_ID], verbose=False)
+                    results = model(frame, classes=[CAT_CLASS_ID], conf=CONF_THRESH, verbose=False)
                     detected = False
                     for r in results:
                         for box in r.boxes:
@@ -326,6 +328,7 @@ def _stream_worker() -> None:
                     # is visible — brief disappearances don't end the session.
                     record_until = time.time() + POST_ROLL
                     if clip_writer is None:
+                        session_start = time.time()
                         ts_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                         clip_path = os.path.join(CLIPS_DIR, f"cat_{ts_str}.mp4")
                         clip_writer = ClipWriter(clip_path)
@@ -357,7 +360,7 @@ def _stream_worker() -> None:
                             _log_event(f"Session {count_snap} ended — saved: {os.path.basename(clip_path)}")
                             threading.Thread(
                                 target=_discord_notify,
-                                args=(f"#{count_snap} at {datetime.datetime.now().strftime('%H:%M:%S')}, {round(time.time() - (record_until - POST_ROLL))}s", clip_path),
+                                args=(f"#{count_snap} at {datetime.datetime.now().strftime('%H:%M:%S')}, {round(time.time() - session_start)}s", clip_path),
                                 daemon=True,
                             ).start()
                         else:

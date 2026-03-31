@@ -15,6 +15,7 @@ services:
       - POST_ROLL=5
       - HWACCEL=cpu
       - INFER_EVERY=3
+      - CONF_THRESH=0.15
       - OMP_NUM_THREADS=2
       - MKL_NUM_THREADS=2
       - INFER_DEVICE=GPU
