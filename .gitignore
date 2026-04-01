@@ -1,2 +1,6 @@
 .env
-cat_classifier.pt
+data/clips/
+data/cat_images/
+data/false_positives/
+data/cat_classifier.pt
+data/false_positives.log

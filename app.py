@@ -297,7 +297,7 @@ def _analyze_false_positives() -> None:
     with _pending_lock:
         _false_positive_samples.clear()
 
-CLASSIFIER_PATH = "cat_classifier.pt"
+CLASSIFIER_PATH = "/data/cat_classifier.pt"
 _classifier       = None
 _classifier_classes: list[str] = []
 _classifier_tf    = transforms.Compose([

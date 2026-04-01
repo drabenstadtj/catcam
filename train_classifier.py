@@ -18,9 +18,9 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import models, transforms
 from PIL import Image
 
-BASE_DIR   = "cat images"
+BASE_DIR   = "/data/cat_images"
 CATS       = ["bonnie", "jinny", "louise"]
-OUTPUT     = "cat_classifier.pt"
+OUTPUT     = "/data/cat_classifier.pt"
 IMG_SIZE   = 224
 EPOCHS     = 60
 BATCH_SIZE = 8
