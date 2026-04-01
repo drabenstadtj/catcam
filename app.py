@@ -17,7 +17,8 @@ import numpy as np
 import torch
 from torchvision import models, transforms
 from PIL import Image
-from flask import Flask, Response, render_template, jsonify, send_from_directory
+from flask import Flask, Response, render_template, jsonify, send_from_directory, request
+import base64
 from flask_socketio import SocketIO
 from ultralytics import YOLO
 
