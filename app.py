@@ -171,6 +171,17 @@ def _discord_notify(message: str, file_path: str | None = None,
 _bot_loop: asyncio.AbstractEventLoop | None = None
 
 
+def _retrain_classifier() -> None:
+    try:
+        import train_classifier
+        log.info("Retraining classifier with new samples...")
+        train_classifier.train()
+        _load_classifier()
+        log.info("Classifier retrained and reloaded.")
+    except Exception as exc:
+        log.error("Classifier retraining failed: %s", exc)
+
+
 class _FeedbackBot(discord.Client):
     async def on_ready(self):
         log.info("Discord feedback bot ready (user: %s)", self.user)
