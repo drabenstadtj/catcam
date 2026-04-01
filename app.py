@@ -1,15 +1,21 @@
 import os
+import io
 import time
 import datetime
 import logging
 import subprocess
 import threading
 from collections import deque
+from zoneinfo import ZoneInfo
+
+_TZ = ZoneInfo("America/New_York")
+
+def _now() -> datetime.datetime:
+    return datetime.datetime.now(_TZ)
 
 import asyncio
 
 import discord
-import requests
 
 
 import cv2
@@ -41,7 +47,6 @@ CLIPS_DIR    = "/data/clips"
 PRE_ROLL     = int(os.environ.get("PRE_ROLL",  30))  # seconds before first detection
 POST_ROLL    = int(os.environ.get("POST_ROLL", 30))  # seconds after last detection
 INFER_EVERY  = int(os.environ.get("INFER_EVERY", 3))    # run YOLO on every Nth frame
-DISCORD_WEBHOOK    = os.environ.get("DISCORD_WEBHOOK_URL", "")
 DISCORD_BOT_TOKEN  = os.environ.get("DISCORD_BOT_TOKEN", "")
 DISCORD_CHANNEL_ID = "1486458529417138356"
 HWACCEL            = os.environ.get("HWACCEL", "qsv")      # qsv | cpu
@@ -131,46 +136,38 @@ def _log_event(msg: str) -> None:
 
 def _discord_notify(message: str, file_path: str | None = None,
                     jpeg_bytes: bytes | None = None, predicted: str | None = None) -> None:
-    if not DISCORD_WEBHOOK:
+    if not DISCORD_BOT_TOKEN or _bot_loop is None:
         return
-    try:
-        if jpeg_bytes:
-            # Use ?wait=true so Discord returns the message object (we need the ID for reactions)
-            url = DISCORD_WEBHOOK + ("&wait=true" if "?" in DISCORD_WEBHOOK else "?wait=true")
-            resp = requests.post(
-                url,
-                data={"content": message},
-                files={"file": ("snapshot.jpg", jpeg_bytes, "image/jpeg")},
-                timeout=10,
-            )
-            if DISCORD_BOT_TOKEN and predicted and resp.ok:
-                msg_id = resp.json().get("id")
-                if msg_id:
-                    _add_reactions(msg_id)
+
+    async def _do():
+        try:
+            ch = _feedback_bot.get_channel(int(DISCORD_CHANNEL_ID)) or \
+                 await _feedback_bot.fetch_channel(int(DISCORD_CHANNEL_ID))
+            if jpeg_bytes:
+                file = discord.File(fp=io.BytesIO(jpeg_bytes), filename="snapshot.jpg")
+                msg = await ch.send(content=message, file=file)
+                if predicted:
+                    for emoji, _ in _FEEDBACK_EMOJIS:
+                        await msg.add_reaction(emoji)
                     with _pending_lock:
                         _pending_feedback.append({
-                            "message_id": msg_id,
+                            "message_id": str(msg.id),
                             "snap_bytes":  jpeg_bytes,
                             "predicted":   predicted,
                             "ts":          time.time(),
                         })
-            return
-        if file_path and os.path.exists(file_path):
-            size_mb = os.path.getsize(file_path) / (1024 * 1024)
-            if size_mb <= DISCORD_MAX_MB:
-                with open(file_path, "rb") as fh:
-                    requests.post(
-                        DISCORD_WEBHOOK,
-                        data={"content": message},
-                        files={"file": (os.path.basename(file_path), fh, "video/mp4")},
-                        timeout=30,
-                    )
-                return
+            elif file_path and os.path.exists(file_path):
+                size_mb = os.path.getsize(file_path) / (1024 * 1024)
+                if size_mb <= DISCORD_MAX_MB:
+                    await ch.send(content=message, file=discord.File(file_path))
+                else:
+                    await ch.send(content=message + f"\n_(clip too large to attach: {size_mb:.0f} MB)_")
             else:
-                message += f"\n_(clip too large to attach: {size_mb:.0f} MB)_"
-        requests.post(DISCORD_WEBHOOK, json={"content": message}, timeout=10)
-    except Exception as exc:
-        log.warning("Discord notify failed: %s", exc)
+                await ch.send(content=message)
+        except Exception as exc:
+            log.warning("Discord notify failed: %s", exc)
+
+    asyncio.run_coroutine_threadsafe(_do(), _bot_loop)
 
 
 _bot_loop: asyncio.AbstractEventLoop | None = None
@@ -218,22 +215,6 @@ class _FeedbackBot(discord.Client):
 
 _feedback_bot: _FeedbackBot | None = None
 
-
-def _add_reactions(message_id: str) -> None:
-    if _feedback_bot is None or _bot_loop is None:
-        return
-
-    async def _do():
-        try:
-            ch  = _feedback_bot.get_channel(int(DISCORD_CHANNEL_ID)) or \
-                  await _feedback_bot.fetch_channel(int(DISCORD_CHANNEL_ID))
-            msg = await ch.fetch_message(int(message_id))
-            for emoji, _ in _FEEDBACK_EMOJIS:
-                await msg.add_reaction(emoji)
-        except Exception as exc:
-            log.warning("Failed to add reactions: %s", exc)
-
-    asyncio.run_coroutine_threadsafe(_do(), _bot_loop)
 
 
 def _run_discord_bot() -> None:
@@ -293,13 +274,7 @@ def _analyze_false_positives() -> None:
     # Add this line to adjust confidence based on false positives
     _adjust_confidence()
     
-    # Optional: Send notification about false positives
-    if DISCORD_WEBHOOK:
-        try:
-            message = f"⚠️ {len(_false_positive_samples)} false positive detections recorded. Check `/data/false_positives.log`"
-            requests.post(DISCORD_WEBHOOK, json={"content": message}, timeout=10)
-        except:
-            pass
+    _discord_notify(f"**False positives** — {len(_false_positive_samples)} recorded\nConfidence threshold adjusted to {CONF_THRESH:.2f}. See `/data/false_positives.log`")
     
     # Clear the list after analysis
     with _pending_lock:
@@ -601,7 +576,7 @@ def _stream_worker() -> None:
                         identity_snap = max(cat_votes, key=cat_votes.get) if cat_votes else "cat"
                         threading.Thread(
                             target=_discord_notify,
-                            args=(f"#{count_snap} {identity_snap} at {datetime.datetime.now().strftime('%H:%M:%S')}",),
+                            args=(f"**{identity_snap}** — detection #{count_snap}\n{_now().strftime('%-I:%M %p')} EST",),
                             kwargs={"jpeg_bytes": snap_buf.tobytes(), "predicted": identity_snap},
                             daemon=True,
                         ).start()
@@ -617,7 +592,7 @@ def _stream_worker() -> None:
                             _log_event(f"Session {count_snap} ended — saved: {os.path.basename(clip_path)}")
                             threading.Thread(
                                 target=_discord_notify,
-                                args=(f"#{count_snap} {identity} at {datetime.datetime.now().strftime('%H:%M:%S')}, {round(time.time() - session_start)}s", clip_path),
+                                args=(f"**{identity}** — session #{count_snap} · {round(time.time() - session_start)}s\n{_now().strftime('%-I:%M %p')} EST  ·  {_now().strftime('%b %-d %Y')}", clip_path),
                                 daemon=True,
                             ).start()
                         else:

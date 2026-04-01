@@ -10,7 +10,6 @@ services:
     devices:
       - /dev/dri:/dev/dri
     environment:
-      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
       - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN:-}
       - PRE_ROLL=5
       - POST_ROLL=5
