@@ -2,25 +2,59 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>CatCam - Sessions</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CatCam - Clips</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #111; color: #ddd; font-family: system-ui, sans-serif; font-size: 15px; }
+    nav { background: #1a1a1a; border-bottom: 1px solid #2a2a2a; padding: 12px 20px; display: flex; gap: 20px; align-items: center; }
+    nav a { color: #aaa; text-decoration: none; font-size: 14px; }
+    nav a:hover, nav a.active { color: #fff; }
+    nav .brand { color: #fff; font-weight: 600; margin-right: 10px; }
+    .page { max-width: 900px; margin: 30px auto; padding: 0 20px; }
+    h1 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
+    .meta { color: #666; font-size: 13px; margin-bottom: 24px; }
+    .clip { background: #1a1a1a; border-radius: 8px; padding: 16px; margin-bottom: 20px; }
+    .clip-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; }
+    .clip-header h3 { font-size: 15px; font-weight: 600; color: #ccc; }
+    .clip-header .size { font-size: 12px; color: #666; }
+    video { width: 100%; border-radius: 6px; display: block; background: #000; }
+    .clip-footer { margin-top: 10px; }
+    .clip-footer a { font-size: 13px; color: #888; text-decoration: none; }
+    .clip-footer a:hover { color: #ddd; }
+    .empty { color: #555; padding: 40px 0; text-align: center; }
+  </style>
 </head>
 <body>
-  <h1>Cat Sessions</h1>
-  <p><a href="/">← Live view</a></p>
-  <p>{{ clips|length }} clip(s) saved &nbsp;|&nbsp; clips are stored at <code>/data/clips/</code></p>
+  <nav>
+    <span class="brand">CatCam</span>
+    <a href="/">Live</a>
+    <a href="/clips" class="active">Clips</a>
+    <a href="/false_positives">False Positives</a>
+  </nav>
 
-  {% if not clips %}
-    <p>No clips yet.</p>
-  {% endif %}
+  <div class="page">
+    <h1>Clips</h1>
+    <p class="meta">{{ clips|length }} clip(s) &nbsp;·&nbsp; stored at <code>/data/clips/</code></p>
 
-  {% for clip in clips %}
-  <hr>
-  <h3>{{ clip.label }} &nbsp; <small>{{ clip.size_mb }} MB</small></h3>
-  <video width="640" controls preload="metadata">
-    <source src="/clips/{{ clip.name }}" type="video/mp4">
-  </video>
-  <br>
-  <a href="/clips/{{ clip.name }}" download="{{ clip.name }}">Download</a>
-  {% endfor %}
+    {% if not clips %}
+      <div class="empty">No clips saved yet.</div>
+    {% endif %}
+
+    {% for clip in clips %}
+    <div class="clip">
+      <div class="clip-header">
+        <h3>{{ clip.label }}</h3>
+        <span class="size">{{ clip.size_mb }} MB</span>
+      </div>
+      <video controls preload="metadata">
+        <source src="/clips/{{ clip.name }}" type="video/mp4">
+      </video>
+      <div class="clip-footer">
+        <a href="/clips/{{ clip.name }}" download="{{ clip.name }}">Download</a>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
 </body>
 </html>

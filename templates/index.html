@@ -2,22 +2,89 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>CatCam</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #111; color: #ddd; font-family: system-ui, sans-serif; font-size: 15px; }
+    nav { background: #1a1a1a; border-bottom: 1px solid #2a2a2a; padding: 12px 20px; display: flex; gap: 20px; align-items: center; }
+    nav a { color: #aaa; text-decoration: none; font-size: 14px; }
+    nav a:hover, nav a.active { color: #fff; }
+    nav .brand { color: #fff; font-weight: 600; margin-right: 10px; }
+    .page { max-width: 900px; margin: 30px auto; padding: 0 20px; }
+    h2 { font-size: 16px; font-weight: 600; color: #ccc; margin-bottom: 12px; }
+    .status-bar { display: flex; gap: 24px; padding: 12px 16px; background: #1a1a1a; border-radius: 8px; margin-bottom: 20px; font-size: 14px; }
+    .status-bar span { color: #888; }
+    .status-bar strong { color: #fff; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 12px; font-weight: 600; }
+    .pill.on  { background: #1a3a1a; color: #4caf50; }
+    .pill.off { background: #2a2a2a; color: #666; }
+    video-wrap { display: block; }
+    img.stream { width: 100%; max-width: 640px; border-radius: 8px; display: block; background: #000; }
+    .log-box { margin-top: 20px; background: #1a1a1a; border-radius: 8px; padding: 14px; font-size: 13px; color: #888; max-height: 160px; overflow-y: auto; }
+    .log-box .entry { padding: 2px 0; border-bottom: 1px solid #222; }
+    .log-box .entry:last-child { border: none; }
+    .section { margin-top: 28px; }
+    .card { background: #1a1a1a; border-radius: 8px; padding: 16px; }
+    button { padding: 8px 18px; border-radius: 6px; border: none; cursor: pointer; font-size: 14px; font-weight: 500; }
+    .btn-primary { background: #2d5a2d; color: #8bc34a; }
+    .btn-primary:hover { background: #366636; }
+    .btn-primary:disabled { background: #222; color: #555; cursor: not-allowed; }
+    .btn-secondary { background: #2a2a2a; color: #aaa; }
+    .btn-secondary:hover { background: #333; color: #ddd; }
+    input[type=file] { display: none; }
+    .upload-label { display: inline-block; padding: 8px 18px; border-radius: 6px; background: #2a2a2a; color: #aaa; cursor: pointer; font-size: 14px; }
+    .upload-label:hover { background: #333; color: #ddd; }
+    .detect-result { margin-top: 14px; }
+    .detect-result img { max-width: 100%; border-radius: 6px; display: block; }
+    .detections { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 8px; }
+    .det-chip { padding: 4px 12px; background: #1a3a1a; color: #8bc34a; border-radius: 99px; font-size: 13px; }
+    .det-chip.none { background: #2a2a2a; color: #888; }
+    #retrain-status { font-size: 13px; color: #888; margin-left: 12px; }
+  </style>
 </head>
 <body>
-  <h1>CatCam</h1>
-  <p><a href="/clips">View saved sessions →</a></p>
+  <nav>
+    <span class="brand">CatCam</span>
+    <a href="/" class="active">Live</a>
+    <a href="/clips">Clips</a>
+    <a href="/false_positives">False Positives</a>
+  </nav>
 
-  <p>
-    Stream: <strong id="label-stream">waiting</strong> &nbsp;|&nbsp;
-    Cat: <strong id="label-cat">no</strong> &nbsp;|&nbsp;
-    Detections this session: <strong id="count">0</strong>
-  </p>
+  <div class="page">
+    <div class="status-bar">
+      <span>Stream: <strong id="label-stream"><span class="pill off">waiting</span></strong></span>
+      <span>Cat: <strong id="label-cat"><span class="pill off">no</span></strong></span>
+      <span>Detections: <strong id="count">0</strong></span>
+    </div>
 
-  <img src="/video_feed" width="640"><br><br>
+    <img src="/video_feed" class="stream" alt="live feed">
 
-  <h3>Detection log</h3>
-  <div id="log">No detections yet.</div>
+    <div class="log-box" id="log"><span style="color:#555">No detections yet.</span></div>
+
+    <div class="section">
+      <div class="card">
+        <h2>Retrain Classifier</h2>
+        <p style="color:#888; font-size:13px; margin-bottom:12px;">Retrain the cat identity model on all images in <code>/data/cat_images</code>.</p>
+        <button class="btn-primary" id="retrain-btn" onclick="triggerRetrain()">Retrain</button>
+        <span id="retrain-status"></span>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="card">
+        <h2>Detect in Image</h2>
+        <p style="color:#888; font-size:13px; margin-bottom:12px;">Upload a photo to run YOLO + classifier on it.</p>
+        <label class="upload-label" for="detect-file">Choose image</label>
+        <input type="file" id="detect-file" accept="image/*" onchange="runDetect(this)">
+        <span id="detect-filename" style="color:#666; font-size:13px; margin-left:10px;"></span>
+        <div class="detect-result" id="detect-result" style="display:none">
+          <img id="detect-img" src="" alt="annotated result">
+          <div class="detections" id="detect-chips"></div>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <script>
     let lastCount = 0;
@@ -26,19 +93,82 @@
       fetch("/api/status")
         .then(r => r.json())
         .then(data => {
-          document.getElementById("label-stream").textContent = data.stream_connected ? "connected" : "waiting";
-          document.getElementById("label-cat").textContent = data.cat_detected ? "YES" : "no";
+          const streamEl = document.getElementById("label-stream");
+          const catEl    = document.getElementById("label-cat");
+          streamEl.innerHTML = data.stream_connected
+            ? '<span class="pill on">connected</span>'
+            : '<span class="pill off">waiting</span>';
+          catEl.innerHTML = data.cat_detected
+            ? '<span class="pill on">YES</span>'
+            : '<span class="pill off">no</span>';
           document.getElementById("count").textContent = data.count;
 
           if (data.count > lastCount) {
-            const ts = new Date().toLocaleTimeString();
+            const ts  = new Date().toLocaleTimeString();
             const log = document.getElementById("log");
-            if (log.textContent === "No detections yet.") log.textContent = "";
-            log.innerHTML = `[${ts}] Cat detected (total: ${data.count})<br>` + log.innerHTML;
+            if (log.querySelector("span")) log.innerHTML = "";
+            log.innerHTML = `<div class="entry">[${ts}] Cat detected — total: ${data.count}</div>` + log.innerHTML;
             lastCount = data.count;
           }
         })
         .catch(() => {});
+    }
+
+    function triggerRetrain() {
+      const btn = document.getElementById("retrain-btn");
+      const status = document.getElementById("retrain-status");
+      btn.disabled = true;
+      status.textContent = "Starting...";
+      fetch("/api/retrain", { method: "POST" })
+        .then(r => r.json())
+        .then(data => {
+          if (data.status === "already_running") {
+            status.textContent = "Already running.";
+            btn.disabled = false;
+          } else {
+            status.textContent = "Training in progress...";
+            pollRetrain();
+          }
+        })
+        .catch(() => { status.textContent = "Error."; btn.disabled = false; });
+    }
+
+    function pollRetrain() {
+      fetch("/api/retrain_status")
+        .then(r => r.json())
+        .then(data => {
+          if (data.in_progress) {
+            setTimeout(pollRetrain, 3000);
+          } else {
+            document.getElementById("retrain-status").textContent = "Done.";
+            document.getElementById("retrain-btn").disabled = false;
+          }
+        });
+    }
+
+    function runDetect(input) {
+      if (!input.files.length) return;
+      const file = input.files[0];
+      document.getElementById("detect-filename").textContent = file.name;
+      const form = new FormData();
+      form.append("image", file);
+      fetch("/api/detect", { method: "POST", body: form })
+        .then(r => r.json())
+        .then(data => {
+          const result = document.getElementById("detect-result");
+          result.style.display = "block";
+          document.getElementById("detect-img").src = "data:image/jpeg;base64," + data.annotated_image;
+          const chips = document.getElementById("detect-chips");
+          chips.innerHTML = "";
+          if (data.detections.length === 0) {
+            chips.innerHTML = '<span class="det-chip none">No cats detected</span>';
+          } else {
+            data.detections.forEach(d => {
+              chips.innerHTML += `<span class="det-chip">${d.label} ${Math.round(d.confidence * 100)}%</span>`;
+            });
+          }
+        })
+        .catch(() => alert("Detection failed."));
     }
 
     poll();

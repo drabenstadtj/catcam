@@ -58,6 +58,10 @@ _pending_feedback: list[dict] = []   # {message_id, snap_bytes, predicted, ts}
 _pending_lock     = threading.Lock()
 _new_sample_count = 0
 
+_yolo_model = None
+_retrain_lock = threading.Lock()
+_retrain_in_progress = False
+
 CONF_THRESH = float(os.environ.get("CONF_THRESH", 0.15))
 _MIN_CONF_THRESH = 0.10  # Minimum allowed confidence
 _MAX_CONF_THRESH = 0.30  # Maximum allowed confidence
@@ -173,6 +177,7 @@ _bot_loop: asyncio.AbstractEventLoop | None = None
 
 
 def _retrain_classifier() -> None:
+    global _retrain_in_progress
     try:
         import train_classifier
         log.info("Retraining classifier with new samples...")
@@ -181,6 +186,8 @@ def _retrain_classifier() -> None:
         log.info("Classifier retrained and reloaded.")
     except Exception as exc:
         log.error("Classifier retraining failed: %s", exc)
+    finally:
+        _retrain_in_progress = False
 
 
 class _FeedbackBot(discord.Client):
@@ -487,7 +494,7 @@ def _ffmpeg_cmd() -> list[str]:
 
 
 def _stream_worker() -> None:
-    global _latest_frame
+    global _latest_frame, _yolo_model
 
     log.info("Loading YOLOv8 model (%s) on device=%s...", MODEL_PATH, INFER_DEVICE)
     if INFER_DEVICE == "GPU":
@@ -498,6 +505,7 @@ def _stream_worker() -> None:
         model = YOLO(ov_path, task="detect")
     else:
         model = YOLO(MODEL_PATH)
+    _yolo_model = model
     log.info("Model ready.")
 
     frame_bytes = FRAME_WIDTH * FRAME_HEIGHT * 3
@@ -710,6 +718,52 @@ def serve_false_positive(filename):
     filename = os.path.basename(filename)  # Prevent path traversal
     folder = os.path.join("/data", "false_positives")
     return send_from_directory(folder, filename, mimetype="image/jpeg")
+
+
+@app.route("/api/retrain", methods=["POST"])
+def api_retrain():
+    global _retrain_in_progress
+    with _retrain_lock:
+        if _retrain_in_progress:
+            return jsonify({"status": "already_running"})
+        _retrain_in_progress = True
+    threading.Thread(target=_retrain_classifier, daemon=True).start()
+    return jsonify({"status": "started"})
+
+
+@app.route("/api/retrain_status")
+def api_retrain_status():
+    return jsonify({"in_progress": _retrain_in_progress})
+
+
+@app.route("/api/detect", methods=["POST"])
+def api_detect():
+    if "image" not in request.files:
+        return jsonify({"error": "no image"}), 400
+    data = np.frombuffer(request.files["image"].read(), dtype=np.uint8)
+    frame = cv2.imdecode(data, cv2.IMREAD_COLOR)
+    if frame is None:
+        return jsonify({"error": "invalid image"}), 400
+    detections = []
+    if _yolo_model is not None:
+        results = _yolo_model(frame, classes=[CAT_CLASS_ID], conf=CONF_THRESH, verbose=False)
+        for r in results:
+            for box in r.boxes:
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                conf = float(box.conf[0])
+                roi = frame[y1:y2, x1:x2]
+                identity = _identify_cat(roi)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 230, 60), 2)
+                cv2.putText(frame, f"{identity}  {conf:.0%}", (x1, max(y1 - 8, 18)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 230, 60), 2, cv2.LINE_AA)
+                detections.append({"label": identity, "confidence": round(conf, 3),
+                                   "bbox": [x1, y1, x2, y2]})
+    _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    return jsonify({
+        "detections": detections,
+        "annotated_image": base64.b64encode(buf).decode(),
+    })
+
 
 # ---------------------------------------------------------------------------
 # Entry point
